@@ -1,0 +1,6 @@
+Dec15IR2e
+young
+18 200ms traces: -160:+180pA
+12 2s traces: -170:+330pA
+holding current: -72pA
+held at 70mV

@@ -1,0 +1,274 @@
+// Make a multiple run fitter:
+objref MRF
+MRF = new MulRunFitter()
+
+// gener list required:
+objref gener
+gener = new List()
+
+// cell name - determines folder name and 
+strdef cellname
+if (CELL==2) {
+	cellname = "Dec15IR2e_y"
+} else if (CELL==3) {
+	cellname = "Jun24IR2i_o"
+}
+
+//init some important params used in the loops:
+objref xobj, f1, orig_data
+strdef xstr
+orig_data = new Matrix()
+f1 = new File()
+
+// Vectors for parameter boundaries:
+objref minvec,maxvec
+minvec = new Vector()
+maxvec = new Vector()
+
+// Keep track of the total number of fitness functions present:
+totalFFs = 0
+
+// Generators and parameters specified in these 2 files using MRFflag
+
+xopen("setup/setupGenerators.hoc")
+xopen("setup/setupParameters.hoc")
+
+NP = parameters.count()
+NGens = gener.count()
+
+/*****************************************************
+ * General useful processes reliant on set up of a MRF
+ ****************************************************/
+ 
+ // First argument to this function has to be the number of parameters
+ // to be set, which is also the number of additional input arguments
+proc set_n_params() {local i
+	for ( i = 1 ; i <= numarg() ; i += 1 ) {
+		MRF.p.pf.parmlist.object(i-1).val = $i
+	}
+	MRF.p.pf.putall()
+}
+
+// For recording voltage traces:
+//set up some kind of voltage recording vector
+objref voltVec
+voltVec = new Vector()
+// voltvecdt is the time step for the voltage vector, output to metaparams.dat
+voltvecdt=0.1
+
+sprint(xstr,"voltVec.record(&%s,%g)",somaname,voltvecdt)
+execute(xstr)
+
+//initialise the vtraces file
+objref vt_file
+vt_file = new File()
+vt_file.wopen("output/vtraces.dat")
+vt_file.close()
+
+//initialise the IV file
+objref iv_file
+iv_file = new File()
+iv_file.wopen("data/IV.dat")
+iv_file.close()
+
+//initialise the IF file
+objref if_file
+if_file = new File()
+if_file.wopen("data/IF.dat")
+if_file.close()
+
+// initialise the parameter combination file
+objref pc_file
+pc_file = new File()
+
+objref invec
+
+proc outputVtrace(){local i, k
+
+	// open up the vtraces file
+	vt_file.aopen("output/vtraces.dat")
+
+	invec = new Vector()
+	for ( i = 1 ; i < ( NP + 1 ) ; i += 1 ) {
+		invec.append($i)
+	}
+	sprint( xstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr, "%sinvec.x[%d]", xstr, k )
+		} else {
+			sprint( xstr, "%s,invec.x[%d]", xstr, k )
+		}
+	}
+	sprint( xstr, "%s)", xstr )
+	execute( xstr  )
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+
+	//save params to vt_file
+	for j=0,parameters.count()-1 {
+		vt_file.vwrite(&MRF.p.pf.parmlist.object(j).val)
+	}
+
+	//for each generator
+	for j=0,gener.count()-1 {
+		//save generator name to vt_file
+		//use binary:
+		//vt_file.vwrite(&gener.object(j).s)
+		//run a generator
+		error = MRF.p.pf.generatorlist.object(j).gen.efun()
+		//save the voltage recording vector to vt_file
+		//use binary:
+		voltVec.vwrite(vt_file)
+		printf("Generator %d: error = %f\n",j,error)
+	}
+
+	//close up the vt file
+	vt_file.close()
+}
+
+//initialise the ivcurve file
+objref iv_file
+iv_file = new File()
+iv_file.wopen("output/ivcurve.dat")
+iv_file.close()
+
+objref invec
+
+proc outputIVcurve(){local i, k
+
+	// open up the ivcurve file
+	iv_file.aopen("output/ivcurve.dat")
+	
+	invec = new Vector()
+
+	// check whether there are any input arguments
+	// if there are, then set them as parameters
+	if (numarg()) {
+		for ( i = 1 ; i < ( NP + 1 ) ; i += 1 ) {
+			invec.append($i)
+		}
+		sprint( xstr , "set_n_params(" )
+		for ( k = 0 ; k < NP ; k += 1 ) {
+			if ( k == 0 ) {
+				sprint( xstr, "%sinvec.x[%d]", xstr, k )
+			} else {
+				sprint( xstr, "%s,invec.x[%d]", xstr, k )
+			}
+		}
+		sprint( xstr, "%s)", xstr )
+		execute( xstr  )
+	}
+	
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+
+	//save params to iv_file
+	for j=0,parameters.count()-1 {
+		iv_file.printf("%f\t", MRF.p.pf.parmlist.object(j).val)
+	}
+	iv_file.printf("\n")
+
+	//for each generator
+	for j=0,gener.count()-1 {
+		//run the generator
+		error = MRF.p.pf.generatorlist.object(j).gen.efun()
+		//save the average voltage between 185 and 195 ms.
+		iv_file.printf("%f\t%f\n", pyr3_.inj1_.amp, voltVec.mean(740,780))
+	}
+	//close up the iv file
+	iv_file.close()
+}
+
+//initialise the spike times file
+objref sptimes_file
+sptimes_file = new File()
+sptimes_file.wopen("output/spTimes.dat")
+sptimes_file.close()
+
+objref apc	//object to count action potentials
+objref v1	//vector to hold action potential data
+
+// initialise these objects
+apc = new APCount(0.5)
+v1 = new Vector()
+
+proc outputSpTimes(){local i, k
+	
+	// open up the spike times file
+	sptimes_file.aopen("output/spTimes.dat")
+	
+	invec = new Vector()
+	for ( i = 1 ; i < ( NP + 1 ) ; i += 1 ) {
+		invec.append($i)
+	}
+	sprint( xstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr, "%sinvec.x[%d]", xstr, k )
+		} else {
+			sprint( xstr, "%s,invec.x[%d]", xstr, k )
+		}
+	}
+	sprint( xstr, "%s)", xstr )
+	execute( xstr  )
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+
+	//save params to sptimes_file
+	for j=0,parameters.count()-1 {
+		sptimes_file.printf("%16.16f \t",MRF.p.pf.parmlist.object(j).val)
+	}
+	sptimes_file.printf("\n")
+
+	apc.record(v1)	//record spike times into v when the simulation runs
+
+	//for each generator
+	for j=1,gener.count()-1 {
+		//save generator name to sptimes_file
+		sptimes_file.printf("%s\n",gener.object(j).s)
+		//run a generator
+		error = MRF.p.pf.generatorlist.object(j).gen.efun()
+		//record number of spikes in file:
+		sptimes_file.printf("%d\n",apc.n)
+		//save the voltage recording vector to vt_file
+		v1.printf(sptimes_file)
+		//append the error value for this generator
+		//append the FCNTYP and fit 
+		//(intercept and slope) if the FCNTYP is lin (for mod, then exp)
+		//(intcpt, slope, and chi) if the FCNTYP is exp (for mod, then exp)
+		//just error if the FR type!=3
+		if (FRtype==3) {
+			if (MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).FCNTYP==0) {
+				sptimes_file.printf("%f\t%d\t%f\t%f\t%f\t%f\n\n",error, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).FCNTYP, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).mod_slope, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).mod_intcpt, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).exp_slope, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).exp_intcpt)
+			} else if (MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).FCNTYP==1) {
+				sptimes_file.printf("%f\t%d\t%f\t%f\t%f\t%f\t%f\t%f\n\n",error, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).FCNTYP, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).mod_slope, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).mod_intcpt, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).modchi, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).exp_slope, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).exp_intcpt, \
+				MRF.p.pf.generatorlist.object(j).gen.fitnesslist.object(0).expchi)
+			}
+		} else {
+			sptimes_file.printf("\n%f\n",error)
+		}
+	}
+	
+	//close up the sptimes_file
+	sptimes_file.close()
+}

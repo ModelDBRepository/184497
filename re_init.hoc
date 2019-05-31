@@ -1,0 +1,22 @@
+// CONTROLS
+MODEL = 1
+MRFflag = 5
+strdef PARENTDIR
+PARENTDIR = getcwd()
+
+xopen("model/pyr3.hoc")
+load_file("optmz/mulfit.hoc")
+xopen("setup/setupMRF.hoc")
+set_conds()
+set_kins()
+pyr3.unset_active()
+
+INITDUR = 50
+if (CELL == 2) {
+	V0 = -70
+} else if (CELL == 3) {
+	V0 = -68.5
+}
+
+xopen("custominit.hoc")
+

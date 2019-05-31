@@ -1,0 +1,235 @@
+// Just load the neuron model, without reloading the MRF
+
+load_file("nrngui.hoc")
+
+strdef somaname,stimname
+somaname="pyr3_.comp[1].v(0.5)"
+stimname="pyr3_.inj1_.amp"
+
+load_file("model/pyr3_template")
+
+objref pyr3_
+pyr3_ = new pyr3(5,CELL)
+
+dt = 0.025
+step_per_ms = 40
+
+tstop = 2015
+v_init = -70
+
+// from setup/setupParameters.hoc
+// Initializing dummy parameters and loading procs to insert these into the model
+dphi_cad   = 52 / 2e-3
+dbeta_cad  = 1 / 100	// in the paper beta = 50 [ms]
+
+dgnaf	= 0.2501575996 // tuned NernstTest12 // 0.312 // tuned 84 // 150e-3 * 1.25 // default
+dgkdr  	= 0.0513842372 // tuned NernstTest12 // 1.554 // tuned 84 // 125e-3
+dgka   	= 0
+dgk2   	= 0
+dgkm	= 0.0016943554 // tuned NernstTest12 // 0.00138 // tuned 84 // 2.5 * 1.5e-3 * 2
+dgkc	= 0
+dgkahp	= 0
+
+dgcad 	= 0
+dgnap 	= 0
+dgcat 	= 0
+dgcal 	= 0
+
+// Passive parameters
+if ( CELL == 2) {
+	// young cell passive parameters // tuned papernew/young_sub/ihold_0_80_160/
+	dgar = 2.83162e-05 // 1e-10
+	dg_pas = 3.95094e-05 // 9.0916e-05
+	de_pas = -67.92914 // -69.9598
+	dcm = 1.09243 // 1.0	// (manual) // 0.9 //(default)
+} else if ( CELL == 3 ) {
+	// aged cell passive parameters // tuned papernew/aged_sub/
+	dgar = 3.61324e-05 // 5.0560e-05
+	dg_pas = 1.71951e-05 // 1.7479e-05
+	de_pas = -76.7721 // -79.9509
+	dcm = 0.70449 // 1.0	// (manual) // 0.9 //(default)
+}
+//dgar    = 1e-10 // (optimised) // 0.25e-03 //(default)
+//dg_pas 	= 9.0916e-05 //tuned 2stage pt 1 SO // 0.0000514733 // tuned NernstTest12 // 0.0000558 // tuned 84 // 0.00014829 // (optimised) // 0.000056 // kin opt  // 2e-05 //(default)
+//de_pas 	= -69.9598 // tuned 2stage pt 1 SO //-65.792 // (optimised) //-70 // (default)
+dRa	  	= 150	// (manual) // 250 //(default)
+dena	= 65.204611 // using nernst( 115 , 5 , 1 )  // 50 // default
+dek		= -75.497 // using nernst( 115 , 5 , 1 ) // -95 // default
+
+// kinetics parameters
+// if a taumod != 1, usetable gets turned off in set_taumods()
+
+// taumods
+dtmmnaf	= 1 // default
+dtmhnaf	= 1 // default
+dtmkdr	= 1 // default
+dtmkm	= 1 // default
+dtmkc	= 1 // default
+dtmcal	= 1 // default
+dtmmka	= 1 // default
+dtmhka	= 1 // default
+dtmnap	= 1 // default
+dtmar	= 1 // default
+
+// vshifts
+dvsnaf 	= -3.5 // default
+dvskdr 	= 0 // default
+dvskm 	= 0 // default
+dvskc	= 0 // default
+dvscal	= 0 // default
+dvska	= 0 // default
+dvsnap	= 0 // default
+dvsar	= 0 // default
+
+/***************************************************************
+ * Use set_conds() and set_kins() to adjust specific sections of
+ * model based on what needs to be changed in each compartment.
+ * Uses dummy values set up by the parameter names, and scales
+ * them according to the compartment being inserted into...
+ * Values set in the dummies are always for the soma, values 
+ * everywhere else will be some scale factor of that.
+ * This function needs to be adjusted if the parameters being
+ * modified are changed.
+ **************************************************************/
+ 
+ proc set_conds() {
+	 forsec pyr3[0].Soma {
+		phi_cad 	= dphi_cad
+		beta_cad	= dbeta_cad
+
+		gbar_naf  	= dgnaf
+		gbar_kdr  	= dgkdr
+		gbar_ka  	= dgka
+		gbar_k2   	= dgk2
+		gbar_ar		= dgar
+		gbar_kc   	= 1.6 * dgkc //dkc * dgkc // in tha paper 'dkc * 12e-3'
+		gbar_kahp 	= dgkahp
+		gbar_km  	= dgkm
+		
+		gbar_cad 	= dgcad
+		gbar_nap 	= dgnap
+		gbar_cat 	= dgcat
+		gbar_cal 	= dgcal
+		
+		g_pas		= dg_pas
+		e_pas	  	= de_pas
+		Ra			= dRa
+		cm			= dcm
+		ena			= dena
+		ek			= dek
+	}
+
+	forsec pyr3[0].Dendrites {
+		phi_cad 	= dphi_cad
+		beta_cad	= dbeta_cad*5
+
+		gbar_naf  	= dgnaf*0.03333
+		gbar_kdr  	= 0
+		gbar_ka   	= dgka*0.06667
+		gbar_k2   	= dgk2
+		gbar_ar		= dgar
+		gbar_kc   	= 0
+		gbar_kahp 	= dgkahp
+		gbar_km  	= dgkm
+		
+		gbar_cad 	= dgcad
+		gbar_nap 	= dgnap
+		gbar_cat 	= dgcat
+		gbar_cal 	= dgcal
+		
+		g_pas		= dg_pas
+		e_pas	  	= de_pas
+		Ra			= dRa
+		cm			= dcm
+		ena			= dena
+		ek			= dek
+	}
+
+	forsec pyr3[0].Axon {
+		gbar_naf  	= dgnaf*2.133
+		gbar_kdr  	= dgkdr*3.2
+		gbar_ka   	= dgka/15
+		gbar_k2   	= dgk2
+		g_pas		= dg_pas*50
+		e_pas	  	= de_pas
+		Ra			= dRa*0.4
+		cm			= dcm
+		ena			= dena
+		ek			= dek
+	}
+
+	forsec pyr3[0].Prox {	
+		gbar_naf  	= dgnaf*0.5
+		gbar_kdr  	= dgkdr*0.75
+	}
+
+	pyr3[0].comp[38] {
+		gbar_ka   	= dgka
+		gbar_naf  	= dgnaf*0.66667
+		gbar_kdr  	= dgkdr*0.75
+	}
+}
+
+// Set kinetic parameters:
+proc set_kins() {
+	// set taumod values to the optimiser values
+	mtaumod_naf	= dtmmnaf
+	htaumod_naf	= dtmhnaf
+	taumod_kdr 	= dtmkdr
+	taumod_km 	= dtmkm
+	taumod_kc 	= dtmkc
+	taumod_cal	= dtmcal
+	mtaumod_ka	= dtmmka
+	htaumod_ka	= dtmhka
+	taumod_nap	= dtmnap
+	taumod_ar	= dtmar
+
+	// set usetable values to 0 if needed
+	if ( mtaumod_naf != 1 ) { usetable_naf = 0 }
+	if ( htaumod_naf != 1 ) { usetable_naf = 0 }
+	if ( taumod_kdr != 1 ) { usetable_kdr = 0 }
+	if ( taumod_km != 1 ) { usetable_km = 0 }
+	if ( taumod_kc != 1 ) { usetable_kc = 0 }
+	if ( taumod_cal != 1 ) {usetable_cal = 0 }
+	if ( mtaumod_ka != 1 ) { usetable_ka = 0 }
+	if ( htaumod_ka != 1 ) { usetable_ka = 0 }
+	if ( usetable_nap != 1 ) {usetable_nap = 0 }
+	if ( usetable_ar != 1 ) {usetable_ar = 0 }
+
+	// vshifts:
+	fastNashift_naf = dvsnaf
+	vshift_kdr 	= dvskdr
+	vshift_km 	= dvskm
+	vshift_kc 	= dvskc
+	vshift_cal 	= dvscal
+	vshift_ka 	= dvska
+	vshift_nap 	= dvsnap
+	vshift_ar 	= dvsar
+
+	// set usetable values to 0 if needed
+	if ( fastNashift_naf != -3.5 ) { usetable_naf = 0 }
+	if ( vshift_kdr != 0 ) { usetable_kdr = 0 }
+	if ( vshift_km != 0 ) { usetable_km = 0 }
+	if ( vshift_kc != 0 ) { usetable_kc = 0 }
+	if ( vshift_cal != 0 ) {usetable_cal = 0 }
+	if ( vshift_ka != 0 ) {usetable_ka = 0 }
+	if ( vshift_nap != 0 ) {usetable_nap = 0 }
+	if ( vshift_ar != 0 ) {usetable_ar = 0 }
+}
+
+NP = 23 // all parameters used in simulations in the paper
+
+set_conds()
+set_kins()
+
+//pyr3_.unset_active()
+
+INITDUR = 50
+V0 = -70
+if (CELL == 2) {
+	V0 = -70
+} else if (CELL == 3) {
+	V0 = -68.5
+}
+xopen("custominit.hoc")
+

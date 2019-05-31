@@ -1,0 +1,205 @@
+load_file("nrngui.hoc")
+
+CELL=2
+model_index=0
+param_index=0
+
+objref model_params, transvec, pyr3_
+objref g,g00,g01,g10,g11,g20,g21
+strdef parstr,gstr
+
+transvec = new Vector()
+
+func go_button() {
+	printf("CELL=%d\nmodel_index=%d\nparam_index=%6\nRUN()!!!\n",CELL,model_index,param_index)
+	//xopen("re_init.hoc")
+	if (object_id(pyr3_)) {
+		// just do some things to the existing model
+	} else {
+		reload_model_with_MRF()
+	}
+	model_params = set_model_parameters()
+	set_one_param_set(model_params.getrow(param_index))
+	return 1
+}
+
+func graphs_button() {
+	printf("CELL=%d\nmodel_index=%d\nparam_index=%6\nRUN()!!!\n",CELL,model_index,param_index)	
+	if (object_id(pyr3_)) {
+		// just do some things to the existing model
+	} else {
+		reload_model()
+	}
+	model_params = set_model_parameters()
+	set_one_param_set(model_params.getrow(param_index))
+	plot_all_6_graphs()
+	return 1
+}
+
+proc reload_model_with_MRF() {
+	// CONTROLS
+	MODEL = 1
+	MRFflag = 5
+	strdef PARENTDIR
+	PARENTDIR = getcwd()
+	
+	xopen("model/pyr3.hoc")
+	load_file("optmz/mulfit.hoc")
+	xopen("setup/setupMRF.hoc")
+	
+	set_conds()
+	set_kins()
+	
+	INITDUR = 50
+	if (CELL == 2) {
+		V0 = -70
+	} else if (CELL == 3) {
+		V0 = -68.5
+	}
+	xopen("custominit.hoc")
+}
+
+proc reload_model() {
+	xopen("load_a_neuron.hoc")
+}
+
+obfunc set_model_parameters() {local num_pars	 localobj parsmat, pv1, pv2, pv3
+	
+	if (model_index == 0) {
+		num_pars = 10
+	} else if (model_index == 1) {
+		num_pars = 23
+	}
+	
+	parsmat = new Matrix (3, NP)
+	
+	pv1 = new Vector()
+	pv2 = new Vector()
+	pv3 = new Vector()
+	
+	// CELL 2 is young, 3 is aged; model_index 0 is 3 channel, 1 is 7 channel
+	if (CELL == 2) {
+		if (model_index == 0) {
+			pv1.append(0.042469, 0.1588, 0.018732, 0, 0, 0, 0, 26000, 0.01, 1.8803, 7.2627, 19.638, 0.074761, 1, 1, 1, 1, -10.878, -5.5365, -36.019, 0, 0, 0)
+			pv2.append(0.040602, 0.14696, 0.018498, 0, 0, 0, 0, 26000, 0.01, 0.89685, 8.158, 19.707, 0.075253, 1, 1, 1, 1, -10.446, -3.8257, -37.33, 0, 0, 0)
+			pv3.append(0.034759, 0.25409, 0.015924, 0, 0, 0, 0, 26000, 0.01, 0.94647, 6.5159, 18.611, 0.12813, 1, 1, 1, 1, -9.8252, -5.7391, -29.665, 0, 0, 0)
+		} else if (model_index == 1) {
+			pv1.append(0.042039,	0.31611,	0.0047585,	0.010658,	0.0037284,	0.00015574,	9.0673e-05,	830.25,	0.0097944,	1.7771,	8.3288,	18.631,	4.1197,	9.4392,	6.0591,	13.646,	1.1585,	-15.304,	-14.901,	-29.992,	0.43005,	-36.416,	-29.279)
+			pv2.append(0.042802,	0.38121,	0.0074711,	0.0065173,	0.0036778,	0.0001199,	0.0001111,	736.04,	0.0099149,	2.084,	8.2943,	18.156,	3.0562,	12.087,	15.652,	12.51,	1.4208,	-15.248,	-16.265,	-34.251,	3,	-34.01,	-31.586)
+			pv3.append(0.041768,	0.14555,	0.0082385,	0.010291,	0.0050655,	6.6648e-05,	8.8751e-05,	298.08,	0.0097699,	1.6815,	7.2567,	18.566,	2.5945,	16.806,	11.124,	14.507,	1.7094,	-15.111,	-11.65,	-35.18,	-21.203,	-27.749,	-21.756)
+		}
+	} else if (CELL == 3) {
+		if (model_index == 0) {
+			pv1.append(0.014614, 0.28229, 0.0015206, 0, 0, 0, 0, 26000, 0.01, 5.0436, 12.413, 9.4201, 1.2383, 1, 1, 1, 1, 3.2483, -5.4921, -9.359)
+			pv2.append(0.014106, 0.23089, 0.0010673, 0, 0, 0, 0, 26000, 0.01, 5.4559, 14.935, 8.8672, 1.7077, 1, 1, 1, 1, 3.1506, -4.7809, -7.3687)
+			pv3.append(0.011448, 0.21266, 0.0017112, 0, 0, 0, 0, 26000, 0.01, 4.2565, 17.386, 7.7921, 1.8011, 1, 1, 1, 1, 4.0508, -5.5383, -9.23210)
+		} else if (model_index == 1) {
+			pv1.append(0.088676, 0.28209, 0.0054771, 0.019922, 0.0006571, 6.0722e-06, 0.0009996499999999999, 47479, 0.0020877, 6.2912, 2.3057, 3.2847, 2.313, 1.3855, 4.7349, 11.179, 1.9527, -5.4739, -36.983, -4.842, -15.314, 10.517, -10.809)
+			pv2.append(0.021656,	0.022436,	0.012717,	0.016599,	0.00093677,	0.00029288,	0.00055053,	34627,	0.0097155,	4.0338,	3.2426,	10.043,	11.298,	14.579,	11.132,	16.244,	1.0253,	-8.8705,	-10.17,	-21.948,	-19.727,	-35.308,	-32.771)
+			pv3.append(0.088802,	0.21798,	0.0049884,	0.019907,	0.00067711,	4.5122e-06,	0.00099362,	51753,	0.0026811,	6.235,	2.3197,	9.0452,	2.2796,	1.4942,	6.0396,	8.3907,	1.9444,	-4.9373,	-34.492,	-4.3734,	-14.967,	10.106,	-10.889)
+		}
+	}
+	
+	parsmat.setrow(0,pv1)
+	parsmat.setrow(1,pv2)
+	parsmat.setrow(2,pv3)
+
+	return parsmat
+}
+
+proc set_one_param_set() {
+	// set parameters
+	dgnaf	= $o1.x[0]
+	dgkdr 	= $o1.x[1]
+	dgkm	= $o1.x[2]
+	dgka	= $o1.x[3]
+	dgkahp	= $o1.x[4]
+	dgnap	= $o1.x[5]
+	dgcal	= $o1.x[6]
+	dphi_cad	= $o1.x[7]
+	dbeta_cad	= $o1.x[8]
+	dtmmnaf	= $o1.x[9]
+	dtmhnaf	= $o1.x[10]
+	dtmkdr	= $o1.x[11]
+	dtmkm	= $o1.x[12]
+	dtmmka	= $o1.x[13]
+	dtmhka	= $o1.x[14]
+	dtmnap	= $o1.x[15]
+	dtmcal	= $o1.x[16]
+	dvsnaf	= $o1.x[17]
+	dvskdr	= $o1.x[18]
+	dvskm	= $o1.x[19]
+	dvska	= $o1.x[20]
+	dvsnap	= $o1.x[21]
+	dvscal	= $o1.x[22]
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+}
+
+proc plot_all_6_graphs() {local i,j
+	// loop through, setting up graphs for all 6 plots
+	// low input in top row: best, pp, fr
+	// high input in bottom row: best, pp, fr
+	
+	for (i=0; i<3; i=i+1) {
+		set_one_param_set(model_params.getrow(i))
+		for (j=0; j<2; j=j+1) {
+
+			sprint(gstr,"g%d%d = new Graph(0)",i,j)
+			execute(gstr)
+
+			sprint(gstr,"g%d%d.size(0,2015,-80,40)",i,j)
+			execute(gstr)
+
+			sprint(gstr,"g%d%d.view(0,-80,2015,130,%d*319,171+(%d*251),300.48,200.32)",i,j,i,j)
+			execute(gstr)
+
+			graphList[0].remove_all()
+
+			sprint(gstr,"graphList[0].append(g%d%d)",i,j)
+			execute(gstr)
+
+			if (i==0) {
+				sprint(gstr,"g%d%d.addvar(\"best fit,",i,j)
+			} else if (i==1) {
+				sprint(gstr,"g%d%d.addvar(\"PP fit,",i,j)
+			} else if (i==2) {
+				sprint(gstr,"g%d%d.addvar(\"FR fit,",i,j)
+			}
+	
+			if (j==0) {
+				sprint(gstr,"%s low current\"",gstr)
+			} else if (j==1) {
+				sprint(gstr,"%s high current\"",gstr)
+			}
+
+			if (i==0) {
+				sprint(gstr,"%s,\"pyr3_.comp[1].v( 0.5 )\", 4, 2)",gstr) 
+			} else if (i==1) {
+				sprint(gstr,"%s,\"pyr3_.comp[1].v( 0.5 )\", 5, 2)",gstr) 
+			} else if (i==2) {
+				sprint(gstr,"%s,\"pyr3_.comp[1].v( 0.5 )\", 3, 2)",gstr)
+			}
+			execute(gstr)
+
+			if (j==0) {
+				if (CELL==2) {
+					pyr3_.inj1_.amp = 0.23
+				} else if (CELL==3) {
+					pyr3_.inj1_.amp = 0.08
+				}
+			} else if (j==1) {
+				pyr3_.inj1_.amp = 0.38
+			}
+
+			init()
+			run()
+		}
+	}
+}
+
+load_file("make_gui.hoc")
+

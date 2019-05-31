@@ -1,0 +1,1128 @@
+
+/* 
+A primitive error function class for multiple run fitter must have a
+	func efun(y_vec, x_vec)
+which is the simulation result of the run. Also, it should register
+itself with a call to parmfitness_efun_append("classname").
+Finally it should supply rfile and wfile procedures for saving its
+state.
+*/
+
+/*********************************************************************************
+
+    PhasePlane_Fitness
+
+    Calculate the distance in phase plane between model and target.  This 
+    is an objective function based on the phase portrait of the trace, proposed 
+    in 
+
+        LeMasson, G and Maex, R.  Introduction to equation solving and parameter 
+	fitting.  In:  Computational Neuroscience:  Realistic Modeling for 
+	Experimentalists.  E. de Schutter, ed.  CRC Press, 2001.
+	
+	This version based on the version used in
+	 
+		Hendrickson, E. B., Edgerton, J. R., and Jaeger, D. (2011) The use of 
+	automated parameter searches to improve ion channel kinetics for neural
+	modeling. J Comput Neurosci, 31:329-346.
+	
+	The phase plane error is calculated by taking a set of points (dV/dt and V) 
+	at given time points in the experimental trace, and calculating the 2D 
+	distance between each point with the dV/dt and V values for a point in the 
+	model trace at the same time as that in the experimental trace. The final
+	error is the mean of these distances.
+	
+	There are 2 approaches to finding the boundaries/list of temporal points to 
+	take these measurements and calculate these distances at:
+		1) A set time window between 2 boundary values
+		2) A series of time windowsrelative to the spikes in the voltage trace. 
+		   This approach still takes 2 boundary values as inputs, but extracts 
+		   points in dV/dt and V for all times within these boundaries relative 
+		   to every spike that is shared by both traces.
+	
+	Problem with method 2 at this stage:
+		The interpolation of the model voltage to the recording times is done 
+		prior to finding the spike times in both model and experimental traces.
+		Therefore, when the peak of the model spike is found, this may be a 
+		tenth of a ms or so from where the actual peak would have been. The 
+		same is true for the experimental data. So there may be a small 
+		discrepancy between these time indices hitting the actual peaks, meaning
+		that the points being compared within the AP window are actually 
+		slightly different. Due to the fast changing V values, this could make 
+		quite a difference to how far off V is, and in particular how far off 
+		dV/dt is... No easy way to account for this yet...
+
+    Christina Weaver, Dec. 2005
+    christina.weaver@mssm.edu
+    Tim Rumbell, Oct. 2013
+    timothy.rumbell@mssm.edu
+
+*********************************************************************************/
+
+install_vector_fitness()
+
+parmfitness_efun_append("PhasePlane_Fitness")
+
+begintemplate PhasePlane_Fitness
+
+// PUBLIC declarations 
+//
+
+public efun, set_data, xdat, ydat, have_data, use_x
+public dV_tgt, dV_mdl, tag
+public unmap, map, vbox, rfile, wfile
+public clone, build, mintstop, before_run
+public save_context, restore_context
+public get_outname, set_r
+public boundary, outname
+public scale
+public EFUN_DBG, VERBOSE, GBAR_SMRY
+public clipboard_data
+
+public spikes
+public apwin
+public inter
+public g
+
+public error
+
+// VARIABLE declarations
+//
+
+// general variables
+objref xdat, ydat	// authoritative target data
+objref dV_mdl, dV_tgt	// first derivative of voltage data.
+objref g, vbox, tobj, this
+strdef tstr, spikelabel, interlabel, mserrlabel, modelabel, scalelabel, tag, tmpstr
+objref boundary, prev_boundary
+objref distances
+
+// variables for time windows to be checked
+objref exp_times, mod_times
+objref exp_temp_times, mod_temp_times
+
+// variables related to spike times
+objref exp_APtimes, mod_APtimes	// AP times of (xdat, ydat) and of the model
+objref apwin, apsubwin
+objref useAP, left_ptr, right_ptr, n_ptr
+objref Png, Pts, Pps, Pac, nw_ptr
+objref VmaxVec
+
+// variables related to interpolation and data to use
+objref exp_t , exp_v , mod_t , mod_v
+objref Vinterp_mdl, Vinterp_exp
+
+//variables related to derivatives
+objref exp_v_deriv, mod_v_deriv
+
+// output variables
+strdef outname, outMname, tab, tmpname
+objref xtmp, ytmp, tmp_idx
+objref dbgfile, dbgfile2, trajmatfile, plotfile
+
+// open file to store phase plane matrix
+//trajmatfile = new File()
+
+EFUN_DBG = 0
+tab = "     "
+if( EFUN_DBG ) { print "Printing efun debug messages" }
+
+// flags for efun() logic
+spikes = inter = prev_inter = no_exp_APs = no_mod_APs = 0
+
+mLidx = mRidx = 0
+tLidx = tRidx = 0
+nV = nDV = 0
+
+exp_APleft = exp_APright = mod_APleft = mod_APright = 0
+n_expAP = n_modAP = 0
+n_expWin = n_modWin = 0
+exp_t_size = 0
+// Used in saving of time windows for analysis:
+exp_temp_spike_time = mod_temp_spike_time = 0
+// Used in difference calculation for each pair of points:
+exp_point_V = exp_point_dV = mod_point_V = mod_point_dV = 0
+
+external clipboard_set, clipboard_get
+
+i=0
+
+proc before_run() {}
+
+/*******************************************************************************
+
+    efun()  The main error function called by the Multiple Run Fitter.
+
+    INPUT:    $o1	y-values of model output (e.g soma.v(.5) )
+	      $o2	t-values of model output (time, ms)
+
+    The model data is always changing when this function is called.  Target data, 
+    on the other hand, is unchanged unless new target data is loaded (or if 
+    parameters defining the Density Grid are changed).  Therefore, the dV/dt and 
+    V vectors of the target data do not need to be recalculated each time, but 
+    the vectors for the model do.  Then, the mean squared difference between the 
+    elements of the two sets of Vectors are evaluated.
+
+********************************************************************************/
+func efun() { local tot_err, one_err, i
+
+EFUN_DBG = 0
+
+    //if( EFUN_DBG ) {   print_Mfile_header($o1,$o2) }
+    
+    // Order of tasks: 	1) Interpolate voltages to consistent time steps
+	//					2) Calculate which time indices are to be used
+	//					3) Set up Vectors holding these indices
+	//					4) Calculate dV/dt for exp and mod traces
+	//					5) Get difference between experimental data point V, 
+	//					   dV/dt and model data point V, dV/dt at same time
+	//					6) Save these differences in a Vector - same length as 
+	//					   time indices
+	//					7) Error is mean of the difference Vector...
+	
+	//	1a) Interpolate model trace to experimental times, with inter flag 0, OR
+	//	1b) Interpolate experimental trace to model times, with inter flag 1
+	
+	exp_t = new Vector()
+	exp_v = new Vector()
+	mod_t = new Vector()
+	mod_v = new Vector()
+	
+	if ( inter == 0 ) {
+		exp_t = xdat.c()
+		exp_v = ydat.c()
+		mod_t = xdat.c()
+		mod_v.interpolate(xdat,$o2,$o1)
+	} else if ( inter == 1 ) {
+		exp_t = $o2.c()
+		exp_v.interpolate($o2,xdat,ydat)
+		mod_t = $o2.c()
+		mod_v = $o1.c()
+	}
+	
+	if( EFUN_DBG ) { 
+		printf("exp_v.size = %d; mod_v.size = %d\n" , exp_v.size , mod_v.size )
+	}
+    
+    //	2) Calculate which time indices are to be used
+    //	a) Check "spikes":
+	//		i) if 0, look at time points between boundary.x[0] and boundary.x[1]
+	//		ii) if 1, get spike times, and add time points for each spike 
+	//		    between spike time + boundary.x[0] and boundary.x[1], for each 
+	//			spike. This requires checking numbers of spikes in both the 
+	//			experimental and model data, choosing the lowest, setting up 
+	//			Vectors of spike times for that many spikes in each trace, 
+	//			adding time indices for the spike times +- the boundary window 
+	//			for each experimental spike time in the list to an experimental 
+	//			time index Vector, doing the same for a model time index Vector
+	
+	exp_times = new Vector()
+	mod_times = new Vector()
+	
+	//	a) Check "spikes":
+	
+	if ( spikes == 0 ) {
+		//	i)
+		if( EFUN_DBG ) {
+			printf("Phase plane error within a region:\n")
+		}
+		if( EFUN_DBG ) { 
+			printf( "start = %d; end = %d\n" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+		}
+		exp_times.indvwhere( exp_t , "[]" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+		if( EFUN_DBG ) {
+			printf( "exp_times.size = %d\n" , exp_times.size )
+		}
+		mod_times = exp_times.c()
+		if( EFUN_DBG ) {
+			printf("mod_times.size = %d\n" , mod_times.size )
+		}
+	} else if ( spikes == 1 ) {
+		//	ii)
+		if( EFUN_DBG ) {
+			printf("Phase plane error of spikes:\n")
+		}
+		
+		// Check whether we already have experimental AP times, if not get them:
+		// NOTE  AP times gives an index into the respective time vector,
+		// representing the time when the AP passes threshold, NOT the
+		// peak.  Use nextpeak.
+		
+		// First we check if there are any AP times saved in exp_APtimes - if 
+		// there are none then it hasn't been done...
+		// If it has been done before, then we check if the resolution of 
+		// exp_t has changed - indicating a different interpolation method - 
+		// if it has changed then we need to get APtime indices again...
+		// Finally we check if the boundaries have been moved, like this:
+		//	Check that boundary.x[0] is between exp_APleft and exp_APleft-1
+		//	Check that boundary.x[1] is between exp_APright and exp_APright+1
+
+		if ( exp_APtimes.size == 0 && no_exp_APs == 0 ) {
+			if( EFUN_DBG ) {
+				printf("New experimental trace:\n")
+			}
+			left_ptr = new Pointer( &exp_APleft )
+			right_ptr = new Pointer( &exp_APright )
+			n_ptr = new Pointer( &n_expAP )
+			if( EFUN_DBG ) {
+				printf("Checking for experimental APs within region:\n")
+				printf( "start = %d; end = %d\n" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+			}
+			find_APtimes( exp_t , exp_v , exp_APtimes , "Exp AP" , 1 \
+												, left_ptr , right_ptr , n_ptr )
+			// Test for no experimental action potentials - if exp_APtimes is 
+			// still empty after running exp_APtimes, then there are no 
+			// experimental action potentials at all in the trace, so skip
+			// everything...
+			if ( n_expAP == 0 ) {
+				no_exp_APs = 1
+			} else if ( n_expAP > 0 ) {
+				no_exp_APs = 0
+			}
+		} else {
+			// if ( exp_t.size != exp_t_size ) {
+			if ( inter != prev_inter ) {
+				if( EFUN_DBG ) {
+					printf("Interpolation changed; repeat target AP search.\n") 
+				}
+				left_ptr = new Pointer(&exp_APleft)
+				right_ptr = new Pointer(&exp_APright)
+				n_ptr = new Pointer(&n_expAP)
+				nw_ptr = new Pointer(&n_expWin)
+				if( EFUN_DBG ) {
+					printf("Checking for experimental APs within region:\n")
+					printf( "start = %d; end = %d\n" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+				}
+				find_APtimes( exp_t , exp_v , exp_APtimes , "Exp AP" , 1 \
+										, left_ptr , right_ptr , n_ptr,nw_ptr )
+				if ( n_expAP == 0 ) {
+				no_exp_APs = 1
+				} else if ( n_expAP > 0 ) {
+					no_exp_APs = 0
+				}
+			} else if ( ( boundary.x[0] != prev_boundary.x[0] ) || \
+									( boundary.x[1] != prev_boundary.x[1] ) ) {
+			/*else if( exp_t.x[ exp_APtimes.x[ exp_APleft ] ] < boundary.x[ 0 ] \
+				|| exp_t.x[ exp_APtimes.x[ exp_APleft -1 ] ] < boundary.x[ 0 ] \
+				|| exp_t.x[ exp_APtimes.x[ exp_APright ] ] > boundary.x[ 1 ] ) {*/
+				
+				if( EFUN_DBG ) {
+					printf("Time boundary changed; repeat target AP search.\n") 
+				}
+				left_ptr = new Pointer(&exp_APleft)
+				right_ptr = new Pointer(&exp_APright)
+				n_ptr = new Pointer(&n_expAP)
+				nw_ptr = new Pointer(&n_expWin)
+				if( EFUN_DBG ) {
+					printf("Checking for experimental APs within region:\n")
+					printf( "start = %d; end = %d\n" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+				}
+				find_APtimes( exp_t , exp_v , exp_APtimes , "Exp AP" , 1 \
+									, left_ptr , right_ptr , n_ptr , nw_ptr )
+				if ( n_expAP == 0 ) {
+					no_exp_APs = 1
+				} else if ( n_expAP > 0 ) {
+					no_exp_APs = 0
+				}
+			}
+		}
+
+		// Next, get model AP times:
+		left_ptr = new Pointer(&mod_APleft)
+		right_ptr = new Pointer(&mod_APright)
+		n_ptr = new Pointer(&n_modAP)
+		if( EFUN_DBG ) {
+			printf("Checking for model APs within region:\n")
+			printf( "start = %d; end = %d\n" , boundary.x[ 0 ] , boundary.x[ 1 ] )
+		}
+		find_APtimes( mod_t , mod_v , mod_APtimes , "Model AP" , 1 , left_ptr \
+														, right_ptr , n_ptr )
+		if ( n_modAP == 0 ) {
+			no_mod_APs = 1
+		} else if ( n_modAP > 0 ) {
+			no_mod_APs = 0
+		}
+		
+		if ( EFUN_DBG ) {
+			printf("no_exp_APs = %d ; no_mod_APs = %d\n" , no_exp_APs \
+																, no_mod_APs )
+		}
+		
+		// If there are no experimental action potentials, get a time 
+		// coordinate for the peak of the trace and use this as the equivalent 
+		// of an AP peak time in the following calculations. Hopefully this 
+		// will produce a larger error than if there had been any APs, and will 
+		// be proportional to how much of an AP the peak represents...
+		
+		if ( no_mod_APs ) {
+			VmaxVec = new Vector()
+			VmaxVec.indvwhere( $o1 , ">=" , $o1.max() )
+			mod_APtimes.append( VmaxVec.x[ 0 ] )
+			n_modAP = 1
+			mod_APleft = 0
+			mod_APright = 0
+			if( EFUN_DBG ) {
+				printf( "Peak of trace detected at time %g\n" , \
+												mod_t.x[ mod_APtimes.x[ 0 ] ] )
+			}
+		}
+		
+		// If there are both experimental spikes and model spikes within the 
+		// time boundaries, then work out time indices for error calculation
+		
+		if ( !no_exp_APs ) {
+			
+			if( EFUN_DBG ) {
+				printf("Spikes in exp:\n")
+			}
+
+			// Check which spike train has more spikes and set n_both to lowest
+			n_both = n_expAP
+			if( n_modAP > n_expAP ) {
+				n_both = n_expAP 
+				n_big  = n_modAP
+			} else {
+				n_both = n_modAP
+				n_big  = n_expAP
+			}
+
+			if( EFUN_DBG ) {
+				printf( "n_expAP=%d; n_modAP=%d; n_both=%d\n" , n_expAP , n_modAP \
+																		, n_both )
+			}
+
+			//	3) Set up Vectors holding these indices
+			
+			// Loop through every spike (up to n_both), and add time indices of the 
+			// AP window around the nextpeak after the spike time...
+			// For both exp and mod...
+			
+			exp_temp_times = new Vector()
+			mod_temp_times = new Vector()
+			
+			for i=0,n_both-1 {
+				//peak = $o2.x[$o1.nextpeak(mod_APtimes.x[i])]
+				//xpeak = xdat.x[ydat.nextpeak(exp_APtimes.x[exind])]
+				
+				// use next peak to get the next peak after the threshold crossing
+				if( EFUN_DBG ) {
+					printf( "exp_APtimes.x[%d]=%g\n" , i , exp_APtimes.x[ exp_APleft + i ] )
+					printf( "mod_APtimes.x[%d]=%g\n" , i , mod_APtimes.x[ mod_APleft + i ] )
+				}
+				// For experimental spike:
+				exp_temp_spike_time = exp_t.x[ exp_v.nextpeak( exp_APtimes.x[ exp_APleft + i ] ) ]
+				exp_temp_times.indvwhere( exp_t , "[]" , exp_temp_spike_time \
+								+ apwin.x[ 0 ] , exp_temp_spike_time + apwin.x[ 1 ] )
+				
+				// Then for model spike:
+				// Use next peak if actual spikes were found:
+				if ( !no_mod_APs ) {
+					mod_temp_spike_time = mod_t.x[ mod_v.nextpeak( \
+										mod_APtimes.x[ mod_APleft + i ] ) ]
+				} else if ( no_mod_APs ) {
+					// Just use the found peak time if there aren't any mod APs
+					mod_temp_spike_time = mod_t.x[ mod_APtimes.x[ mod_APleft + i ] ]
+				}
+				mod_temp_times.indvwhere( mod_t , "[]" , mod_temp_spike_time \
+								+ apwin.x[ 0 ] , mod_temp_spike_time + apwin.x[ 1 ] )
+				
+				// Need to check that these have the same number of points before
+				// appending the temp vectors to the main vectors of time indices...
+				// Check if either are 0, which means that although the threshold
+				// was within the trace, the apwin times relative to the peak were
+				// not (probably due to -ve apwin region and threshold crossing 
+				// very close to 0 / start of recording )
+				if ( exp_temp_times.size() > 0 && mod_temp_times.size() > 0 ) {
+					size_diff = exp_temp_times.size() - mod_temp_times.size()
+					if ( size_diff == 0 ) {
+						exp_times.append( exp_temp_times )
+						mod_times.append( mod_temp_times )
+					} else if ( size_diff > 0 ) {
+						exp_times.append( exp_temp_times.c( 0 , mod_temp_times.size()-1 ) )
+						mod_times.append( mod_temp_times )
+					} else if ( size_diff < 0 ) {
+						exp_times.append( exp_temp_times )
+						mod_times.append( mod_temp_times.c( 0 , exp_temp_times.size()-1 ) )
+					}
+				} else {
+					if ( exp_temp_times.size() == 0 ) {
+						no_exp_APs = 1
+					}
+					if ( mod_temp_times.size() == 0 ) {
+						no_mod_APs = 1
+					}
+				}
+			}
+		}
+	}
+	
+	// Calculate phase plane error:
+	// If we aren't using spikes, then get error for time indices within
+	// boundaries, if we are using spikes, check that there are spikes first
+	
+	if ( !spikes || !no_exp_APs ) {
+		
+		if( EFUN_DBG ) {
+			printf("Able to calculate error:\n")
+		}
+	
+		// Now we have lists of the time indices to be used in the error calculation 
+		// for both model and experimental data, for either method spikes==0 or 1.
+		// Next we have to calculated the derivatives of the voltage:
+		
+		// 	4) Calculate dV/dt for exp and mod traces
+		
+		exp_v_deriv = new Vector()
+		mod_v_deriv = new Vector()
+		
+		// experimental Voltage derivative calculation
+		exp_v_deriv.deriv( exp_v , exp_t.x[1] - exp_t.x[0] , 2 )
+		if( EFUN_DBG ) {
+			printf("exp_v_deriv.size = %d\n" , exp_v_deriv.size )
+		}
+		
+		// model Voltage derivative calculation
+		mod_v_deriv.deriv( mod_v , mod_t.x[1] - mod_t.x[0] , 2 )
+		if( EFUN_DBG ) {
+			printf("mod_v_deriv.size = %d\n" , mod_v_deriv.size )
+		}
+		
+		//	5) Get difference between experimental data point V, dV/dt and model 
+		//	   data point V, dV/dt at same time
+		
+		// Set up a new Vector to hold these differences (6)
+		
+		distances = new Vector(exp_times.size)
+		if( EFUN_DBG ) {
+			printf("distances.size = %d\n" , distances.size )
+		}
+		
+		for i = 0 , exp_times.size()-1 {
+			// get the four points involved in the calculation:
+			exp_point_V = exp_v.x[ exp_times.x[i] ]
+			exp_point_dV = exp_v_deriv.x[ exp_times.x[i] ]
+			mod_point_V = mod_v.x[ mod_times.x[i] ]
+			mod_point_dV = mod_v_deriv.x[ mod_times.x[i] ]
+			
+			// Use these four points in Euclidean distance calculation:
+			distances.x[i] = sqrt( ( exp_point_V - mod_point_V )^2 + \
+												( exp_point_dV - mod_point_dV )^2 )
+			if( EFUN_DBG ) {
+				printf( "exp_time=%g; mod_time=%g; exp_point=(%g,%g); mod_point=(%g,%g); distance=%g\n" \
+					   , exp_t.x[ exp_times.x[i] ] , mod_t.x[ mod_times.x[i] ] \
+					   , exp_point_V , exp_point_dV , mod_point_V , mod_point_dV \
+					   , distances.x[i] )
+			}
+		}
+		
+		//	7) Error is mean of the difference Vector...
+
+		tot_err = 0
+		
+		if ( distances.size() > 0 ) {
+			tot_err = distances.mean()
+		}
+	}
+	
+	// If there are no experimental spikes...
+	if ( spikes && no_exp_APs ) {
+		if( EFUN_DBG ) {
+			printf("ERROR in PhasePlane_Fitness: no experimental APs detected\n")
+			printf("Set spikes = 0 to get phase plane error value from region\n")
+			printf("between boundary values...\n")
+			tot_err = 0
+		}
+	}
+
+	if( EFUN_DBG ) {
+		printf("tot_err = %g; scale = %g; error value = %g\n" , tot_err \
+													, scale , tot_err * scale )
+	}
+
+	// record inter and boundaries in previous holders so these can be checked 
+	// next time
+	prev_boundary = boundary.c()
+	prev_inter = inter
+	
+	error = tot_err * scale
+	
+	// change 05 Jan 2015
+	// If there are experimental spikes but no model spikes, increase error
+	// by an order of magnitude
+	
+	if ( !no_exp_APs && no_mod_APs ) {
+		error = error * 10
+		tot_err = tot_err * 10
+	}
+	
+	if (use_gui) {
+		sprint(mserrlabel, "%g", tot_err*scale)
+		redraw($o2, $o1)
+	}
+
+    return tot_err * scale
+}
+
+/****************************************************
+	Count APs which occur during the specified time boundary. 
+****************************************************/
+proc find_APtimes() { local i, firing, thresh, idx	localobj dvdt, dtdt
+	// $o1 x component, $o2 y component of a voltage trace
+	// $o3 stores AP times
+	// $s4 stores descriptive string
+	// $5  1 or 0, print result to screen?
+	// $o6, points to AP after left boundary
+	// $o7, points to AP before right boundary
+	// $o8, points to count of APs within boundary
+
+	thresh = -30
+	dvdtthresh = 15
+
+	$o3 = new Vector()
+
+	//~ firing = 0
+	//~ check($o1,$o2,$o3,0,thresh,firing)
+	//~ for i = 0, $o1.size-1 {
+	    //~ firing = check($o1,$o2,$o3,i,thresh,firing)
+	//~ }
+	
+	// Changing from threshold crossing to stating that if dv/dt > +10 mV/ms
+	// then we have a spike
+	
+	// First get dv/dt of voltage trace
+	dvdt = new Vector()
+	dvdt.deriv( $o2 )
+	//dvdt.printf("%f\n")
+	
+	// Second, convert dvdt into mV/ms - currently it is just the difference 
+	// between points, rather than in the correct format... Scaling factor
+	// should be the end time of the trace (last value in $o1) / total points
+	// in the voltage vector (length of $02), giving average time diff per pair 
+	// of points, and assuming that voltage vector is equally spaced in time...
+	dtdt = new Vector()
+	dtdt.deriv( $o1 )	
+	dvdt.div( dtdt )
+	//dvdt.printf("%f\n",0,500)
+	
+	// Third, look for crossings of +10
+	firing = 0
+	check($o1,dvdt,$o3,0,dvdtthresh,firing)
+	for i = 0, $o1.size-1 {
+	    firing = check($o1,dvdt,$o3,i,dvdtthresh,firing)
+	}
+	
+	EFUN_DBG = 0
+	if ( EFUN_DBG ) {
+		printf("number of spikes: %d\n" , $o3.size )
+		for i = 0 , $o3.size-1 {
+			printf("Spike time %g = %g\n" , i , $o3.x[i] )
+		}
+	}
+	
+
+	// find first AP after, and last AP before, the time bounds
+	$o6.val = $o1.ind($o3).indwhere(">=", boundary.x[0])
+	// probably, keep left boundary less than zero.
+	// if( $o6.val < 0 ) $o6.val = $o3.size
+	$o7.val = $o1.ind($o3).indwhere(">", boundary.x[1]) - 1
+	if( $o7.val < 0 ) $o7.val = $o3.size-1
+
+	$o8.val = $o7.val-$o6.val+1
+	if( $o7.val < 0 || $o6.val < 0 ) $o8.val = 0
+
+	if( EFUN_DBG ) {
+	    printf("left = %g, right = %g, count = %g\n",$o6.val,$o7.val,$o8.val)
+	    if( $o6.val > 0 ) {
+		printf("first %s after  bound %g has time %g\n",$s4,boundary.x[0],$o1.x[$o3.x[$o6.val]])
+	    }
+	    if( $o7.val > 0 ) {
+		printf("last  %s before bound %g has time %g\n",$s4,boundary.x[1],$o1.x[$o3.x[$o7.val]])
+	    }
+	    printf("Total valid APs %d\n",$o8.val)
+	}
+	EFUN_DBG = 0
+}
+
+func check() { local idx, thresh, firing, time
+	// $o1 x component, $o2 y component of a voltage trace
+	// $o3 stores AP times
+
+       idx = $4
+       thresh = $5
+       firing = $6
+       if( $o2.x[idx] >= thresh && !firing ) { 
+           firing = 1
+	   time = $o1.x[idx]
+	   $o3.append(idx)
+       }
+       if(firing && $o2.x[idx] < thresh && $o1.x[idx] > time) { firing = 0 }
+       return firing
+}
+
+proc save_context() { local i
+	$o1.pack(tag, scale, ydat, \
+		 ydat.label, xdat, boundary)
+	$o1.pack(apwin)
+}
+
+proc restore_context() { local i
+	$o1.unpack(tag,	&scale, ydat)
+	$o1.unpack(tstr, xdat)
+	ydat.label(tstr)
+	set_data(xdat, ydat)
+	$o1.unpack(boundary)
+	$o1.unpack(apwin)
+}
+
+proc init() {local i
+
+    print "initializing PhasePlane_Fitness, last modified 21 Oct 2013"
+	//EFUN_DBG =0
+	VERBOSE = 0
+	GBAR_SMRY = 0
+
+	sprint(tag, "%s", this)
+	sscanf(tag, "%[^[]", tag)
+	use_x = 0
+	use_gui = 0
+	have_data = 0
+	spikes = 0
+	inter = 0
+
+	xdat = new Vector(0)
+	ydat = new Vector(0)
+	boundary = new Vector(2)
+
+	outname = "PhasePlane_data"
+
+    scale = 1//5e4
+
+	apwin = new Vector(2)
+	apwin.x[0] = apwin.x[1] = 0
+
+	exp_APtimes = new Vector(0)
+	mod_APtimes = new Vector(0)
+
+	if (have_data) {
+		boundary.x[0] = xdat.x[0]
+		boundary.x[1] = xdat.x[xdat.size()-1]
+	} else {
+	    boundary.x[0] = boundary.x[1] = 0
+	}
+
+    //print "\tdone initializing PhasePlane_Fitness"
+}
+
+proc clone() {
+	$o1 = new PhasePlane_Fitness()
+	$o1.have_data = have_data
+	if (have_data) {
+		$o1.set_data(xdat, ydat)
+	}
+	$o1.boundary  = boundary.c
+	$o1.apwin      = apwin.c
+	$o1.scale     = scale
+}
+
+proc redraw() { local i, xpsn
+    if (use_gui) {
+	g.erase()
+	if (have_data) {
+		g.label(.8, .95)
+		ydat.plot(g, xdat, 2, 1)
+		if (spikes==0){
+			for i=0, boundary.size() - 1 {
+				g.beginline(3, 1)
+				g.line(boundary.x[i], g.size(3))
+				g.line(boundary.x[i], g.size(4))
+			}
+		} else if (spikes==1) {
+			if (n_expAP > 0) {
+				
+			}
+		}
+	}
+	if (numarg() == 2) {
+		$o2.line(g, $o1)
+	}
+	g.flush()
+    }
+
+}
+
+
+func mintstop() {
+	return boundary.x[1]
+}
+
+proc set_data() {local i
+	have_data = 0
+	i = $o1.indwhere(">=", 0)
+	if (i < 0 || $o1.size < 1) return
+	// copy $o1 into xdat without label;
+	// copy $o2 into ydat with its label string
+	xdat = $o1.c(i)
+	ydat = $o2.cl(i)
+	boundary.x[0] = xdat.x[0]
+	boundary.x[1] = xdat.x[xdat.size-1]
+	have_data = 1
+	if (use_gui) {
+		g.size(xdat.min(), xdat.max(), ydat.min(), ydat.max())
+		redraw()
+	}
+}
+
+proc clipboard_data() {
+	sprint(tstr, "%s.set_data(hoc_obj_[1], hoc_obj_[0])", this)
+	if(execute1(tstr) == 0) {
+            continue_dialog("No data in the Vector clipboard. Select a Graph line first")
+	}
+}
+
+proc build() {
+	if (use_gui) return
+	use_gui = 1
+	vbox = new VBox(3)
+	vbox.ref(this)
+	sprint(tstr, "execute(\"%s.unmap()\")", this)
+	vbox.dismiss_action(tstr)
+	vbox.save("save()")
+	vbox.intercept(1)
+	g = new Graph(0)
+	xpanel("", 1)
+	g.menu_tool("Adjust", "adjust_region")
+	xmenu("Select")
+		xbutton("Data from Clipboard", "clipboard_data()")
+		xbutton("Set weight", "set_weight()")
+		xbutton("Set inter", "set_inter()")
+		xbutton("Set spike window", "set_spike_window()")
+		xbutton("Region panel", "region_panel()")
+		xbutton("Set output info", "output_panel()")
+	xmenu()
+	xvarlabel(modelabel)
+	sprint(scalelabel, "scale=%g;", scale)
+	xvarlabel(scalelabel)
+	sprint(interlabel, "inter=%d;", inter)
+	xvarlabel(interlabel)
+	sprint(spikelabel, "Spikes=%d: %g,%g;", spikes, apwin.x[0], apwin.x[1])
+	xvarlabel(spikelabel)
+	mserrlabel="Error xxxx"
+	xvarlabel(mserrlabel)
+	xpanel()
+	g.view(0, -80, 5, 40, 0,300,0,200)
+	if (have_data) {
+		g.size(xdat.min(), xdat.max(), ydat.min(), ydat.max())
+		redraw()
+	}
+	vbox.intercept(0)
+}
+
+proc adjust_region() {local x
+//print $1, $2, $3
+	if ($1 == 2) { // press
+		adjust = pick_region($2)
+		set_r()
+	}
+	if (adjust == -1) {
+		return
+	}
+	if ($1 == 1) { // drag
+		boundary.x[adjust] = $2
+		if (adjust < boundary.size()-1) if ($2 > boundary.x[adjust+1]){
+			boundary.x[adjust] = boundary.x[adjust+1]
+		}
+		set_r()
+	}
+	if ($1 == 3) { // release
+		x = g.view_info(g.view_info, 11, $2)
+		if (boundary.size() > 2) {
+			if (x < 0) {
+				boundary.remove(0)
+			}else if (x > 1) {
+				boundary.remove(boundary.size()-1)
+			}else{
+				x = boundary.x[adjust]
+				tobj = boundary.c.indvwhere("==", x)
+				if (tobj.size() > 1) {
+					boundary.remove[adjust]
+				}
+			}
+		}
+		boundary.sort()
+		set_r()
+		adjust = -1
+	}
+}
+
+func pick_region() {local vi, d, i, j, x, m
+	vi = g.view_info
+	x = g.view_info(vi, 13, $1)
+	for i=0, boundary.size() - 1 {
+		d = x -  g.view_info(vi, 13, boundary.x[i])
+		if (d < 12) { // before or on i
+			break
+		}
+	}
+	/***
+	if (i == boundary.size()) {
+		boundary.append($1)
+		return i
+	}
+	***/
+	if (d > -12) { // actual selection of line
+		return i
+	}
+        /***
+	boundary.insrt(i, $1)
+	if (i == 0) {
+		weight.insrt(1, weight.x[1])
+	}else{
+		weight.insrt(i, weight.x[i])
+	}
+        ***/
+	return i
+}
+
+proc set_weight() {local wt
+	wt = scale
+	sprint(tmpstr, "%g", wt)
+	while (1) {
+if (string_dialog("Enter function weight",tmpstr)){
+			if (sscanf(tmpstr, "%g", &scale) == 1) {
+	sprint(scalelabel, "scale=%g",scale)
+				return
+			}
+		}else{
+			break
+		}
+	}
+	scale = wt
+}
+
+proc set_inter() {local interpolation
+	interpolation = inter
+	sprint(tmpstr, "%g", interpolation)
+	while (1) {
+		if ( string_dialog ( \
+				"Enter interpolation method: 0 (mod to exp), 1 (exp to mod)" \
+																, tmpstr ) ) {
+		if (sscanf(tmpstr, "%g", &inter) == 1) {
+		sprint(interlabel, "inter=%g",inter)
+		return
+	}
+		}else{
+			break
+		}
+	}
+	inter = interpolation
+}
+
+proc set_spike_window() {local locspikes, winstart, winend
+	locspike = spikes
+	winstart = apwin.x[0]
+	winend = apwin.x[1]
+	sprint(tmpstr, "%d %g %g", locspike, winstart, winend)
+	while(1) {
+		if (string_dialog("Enter space seperated spikes (no=0,yes=1), window start, and window end",tmpstr)){
+			if (sscanf(tmpstr, "%d %g %g", &spikes, &apwin.x[0], &apwin.x[1]) == 3) {
+				sprint(spikelabel, "Spikes=%d: %g,%g", spikes, apwin.x[0], apwin.x[1])
+				return
+			}
+		} else {
+			break
+		}
+	}
+	spikes = locspike
+	apwin.x[0] = winstart
+	apwin.x[1] = winend
+}
+
+proc map() {
+	if (!use_gui) build()
+	if (numarg() > 1) {
+		vbox.map($s1, $2, $3, $4, $5)
+	}else if (numarg() == 1){
+		vbox.map($s1)
+	}else{
+		vbox.map()
+	}
+        redraw()
+}
+
+proc unmap() {
+}
+
+proc save() {local i
+	vbox.save("load_file(\"e_phaseplane.hoc\", \"PhasePlane_Fitness\")}\n{")
+		vbox.save("ocbox_=new PhasePlane_Fitness(1)")
+        vbox.save("}\n{object_push(ocbox_)}\n{build()")
+	if (object_id(xdat)) {
+		sprint(tstr, "xdat = new Vector(%d)", xdat.size)
+		vbox.save(tstr)
+		sprint(tstr, "ydat = new Vector(%d)", ydat.size)
+		vbox.save(tstr)
+		sprint(tstr, "ydat.label(\"%s\")", ydat.label)
+		vbox.save(tstr)
+sprint(tstr, "for i=0,%d { xdat.x[i]=fscan() ydat.x[i]=fscan()}}",\
+xdat.size - 1)
+		vbox.save(tstr)
+		for i=0,xdat.size-1 {
+			sprint(tstr, "%g %g", xdat.x[i], ydat.x[i])
+			vbox.save(tstr)
+		}
+		vbox.save("{set_data(xdat, ydat)}")
+	}else{
+		vbox.save("}")
+	}
+        vbox.save("{object_pop()}\n{")
+	g.save_name("ocbox_.g", 1)
+}
+
+
+proc wfile() { local chooseAP
+
+        // Whenever adding more data, be sure to update the line count here!
+	// add 2 lines (to report vector size, plus one more), + vector size
+	// extra 6 lines are for boundary, ap window, ap subwindow
+	// extra lines for which APs will be used.
+	$o1.printf("PhasePlane_Fitness xdat ydat boundary (lines=%d) ",\
+		4 + 2*xdat.size() + 2 + 2 + 2 )
+	$o1.printf(" %g\n",\
+		   scale)
+	$o1.printf("|%s|\n", ydat.label)
+	$o1.printf("%d\n", xdat.size())
+	xdat.printf($o1)
+	ydat.printf($o1)
+
+	$o1.printf("2\n%g\n%g\n", boundary.x[0],boundary.x[1])
+}
+
+proc rfile() {local i, n
+	scale = $o1.scanvar
+	sprint(scalelabel, "scale=%g",scale)
+	$o1.gets(tstr)
+	if (sscanf(tstr, "|%[^|]", tstr) == 1) {
+		ydat.label(tstr)
+	}
+	n = $o1.scanvar
+	if (n > 0) {
+		xdat.resize(n) ydat.resize(n)
+		xdat.scanf($o1, n)
+		ydat.scanf($o1, n)
+		set_data(xdat, ydat)
+	}
+
+	n = $o1.scanvar
+	boundary.resize(n)
+	boundary.scanf($o1, n)
+}
+
+proc region_panel() {
+	xpanel("Region boundaries")
+	xpvalue("interval startpoint", &boundary.x[0], 1, "set_r()")
+	xpvalue("interval endpoint", &boundary.x[1], 1, "set_r()")
+
+	xpanel()
+}
+
+proc output_panel() {
+	xpanel("Output info")
+	xcheckbox("Write M-file", &EFUN_DBG)
+	xcheckbox("Write verbose M-file", &VERBOSE)
+	xcheckbox("Write conductance summary (Av-Ron model only)", &GBAR_SMRY)
+	//xcheckbox("Write M-file", &EFUN_DBG, "EFUN_DBG = !EFUN_DBG")
+	//xcheckbox("Write verbose M-file", &VERBOSE, "{ VERBOSE = !VERBOSE EFUN_DBG = 1}")
+	xbutton("Set output filename","get_outname(outname)")
+
+	if( VERBOSE ) { EFUN_DBG = 1 }
+	if( !ismembrane("fn") ) { GBAR_SMRY = 0 }
+
+	xpanel()
+}
+
+
+proc set_r() {local i, t, tmin, tmax, n
+    if (have_data){
+		// make sure regions are within data boundaries
+		tmin = xdat.x[0]
+		tmax = xdat.x[xdat.size() - 1]
+		n = boundary.size()
+		for i=0, n-1 {
+			t = boundary.x[i]
+			if (t < tmin) {
+				boundary.x[i] = tmin
+			}
+			if (t > tmax) {
+				boundary.x[i] = tmax
+			}
+		}
+    }
+    redraw()
+}
+
+proc get_outname() {
+     string_dialog("Enter output filename",$s1)
+}
+
+proc print_Mfile_header() { 
+
+    print "\nPrinting error function data to M-file ",outname
+    print "Scale factor = ", scale
+    sprint(outMname,"%s.m",outname)
+    dbgfile = new File()
+    dbgfile.wopen(outMname)
+
+    nlbl = 1
+
+    dbgfile.printf("lbl(%d) = {'scale = %g'};\n",nlbl,scale)
+    nlbl += 1
+    dbgfile.printf("scale = %g;\n",scale)
+
+    dbgfile.printf("boundary = [%g %g];\n",boundary.x[0],boundary.x[1])
+
+    if( VERBOSE ) {
+        dbgfile.printf("xmodel = [")
+        $o2.printf(dbgfile,"%12.9f\n ")
+        dbgfile.printf("];\n")
+        dbgfile.printf("ymodel = [")
+        $o1.printf(dbgfile,"%12.9f\n ")
+        dbgfile.printf("];\n")
+
+        dbgfile.printf("xexpt = [")
+        xdat.printf(dbgfile,"%12.9f\n ")
+        dbgfile.printf("];\n")
+        dbgfile.printf("yexpt = [")
+        ydat.printf(dbgfile,"%12.9f\n ")
+        dbgfile.printf("];\n")
+
+    }
+    nstr = 1
+}
+
+proc print_Mfile_tail() { local e
+
+    e = $3
+
+    dbgfile.printf("e_final = %g;\n",e)
+    dbgfile.printf("str(%d) = {'Total Error           %g'};\n",nstr,e)
+    nstr += 1
+
+    dbgfile.printf("figure(1);\n")
+    dbgfile.printf("h = axes('Position',[0 0 1 1],'Visible','off');\n")
+    dbgfile.printf("ttl = '%s:  Total Error %g';\n",outname,e)
+    if( VERBOSE ) {
+        dbgfile.printf("axes('Position',[.1 .5 .8 .4]);\n")
+	dbgfile.printf("x1=[boundary(1) boundary(1)];\n")
+	dbgfile.printf("x2=[boundary(2) boundary(2)];\n")
+	dbgfile.printf("y1=[min(yexpt) max(yexpt)];\n")
+	dbgfile.printf("pl = plot(xexpt,yexpt,'--',xmodel,ymodel,'-',x1,y1,'r',x2,y1,'r');\n")
+	dbgfile.printf("set(pl(1),'LineWidth',2); set(pl(2),'LineWidth',2); \n")
+	dbgfile.printf("legend('target','model');\n")
+	dbgfile.printf("title(ttl);\n")
+    }
+    dbgfile.printf("set(gcf,'CurrentAxes',h);\n")
+    dbgfile.printf("text(.05,.25,lbl,'FontSize',12);\n")
+    dbgfile.printf("text(.5,.25,str,'FontSize',12);\n")
+}
+
+endtemplate PhasePlane_Fitness

@@ -1,0 +1,339 @@
+//params and set up for LHS
+
+pop_size=1900				// size of the population.	
+Num_Total_Gen = 1			// Total number of generations to run
+Best=0						// curent best individual
+Elapsed=0					// Total time of run
+longest_gen=0				// hold longest generation so far, in s
+
+DEBUG=0	//OUTPUT: 0 - no debugging msgs; 1 - all debugging msgs
+
+objref pop,res,pop_vec,ffs,errVec
+objref transvec
+objref p_file,pc_file,param_file,fv_file,randomData,scratch_file
+
+strdef cmd,tstr,parstr
+
+p_file = new File()
+pc_file = new File()
+param_file = new File()
+fv_file = new File()
+randomData = new File()
+scratch_file = new File()
+
+//open fitnessVal log file
+fv_file.wopen("../output/lhsresults.dat")
+
+//File containing random seeds to use
+randomData.ropen("../data/rands.dat")
+
+p_file.ropen("../output/curr_population")
+pop_size = p_file.scanvar() // read size of population from curr_population
+p_file.close()
+
+pop = new Matrix( pop_size , NP )
+res = new Vector( pop_size , 1e50 )
+ffs = new Matrix( pop_size , totalFFs )
+transvec = new Vector( NP )
+errVec = new Vector( totalFFs )
+
+// random numbers and initial boundaries for the population
+objref  r[NP],ru[pc.nhost()]
+
+// initialise a random number generator for each parameter
+for j=0,(NP-1){
+	r[j] = new Random(randomData.scanvar())
+	r[j].uniform(minvec.x[j],maxvec.x[j])
+}
+
+// initialise a random number generator for each parallel host
+for j=0,(pc.nhost()-1){
+	ru[j] = new Random(randomData.scanvar())
+	ru[j].uniform(0,1)
+}
+
+// close the random number file
+randomData.close()
+
+LOAD_GENERATION=1	// if zero generates random initial population, if one load generation from file
+
+num_gen=1
+
+//=======================MAIN LHS RUN================================
+proc LHS() { local i,j,k
+
+	init_pop()
+	
+	// make file of DE parameters for producing output figures
+	param_file.wopen( "output/metaparams.dat" )
+	param_file.printf( "%s: %s\n" , "paramname" , "paramvalue" )
+	param_file.printf( "%s: %d\n" , "population" , pop_size ) 
+	param_file.printf( "%s: %d\n" , "parameters" , NP )
+	param_file.printf( "%s: %d\n" , "generators" , NGens )
+	param_file.printf( "%s: %d\n" , "totalFFs" , totalFFs )
+	param_file.printf( "%s: %d\n" , "totalT" , (Tend.max()/voltvecdt) )
+	param_file.printf( "%s: %d\n" , "MRF" , MRFflag )
+	param_file.printf( "%s: %g\n" , "dt" , voltvecdt)
+
+	begintime = startsw()
+
+	while(num_gen<=Num_Total_Gen){	// termination criterion besed on fixed # Generations
+		startgentime = startsw()
+		Evaluate_pop(0)
+       	gen_time = startsw() - startgentime
+       	if ( gen_time > longest_gen ) { longest_gen = gen_time }
+       	find_best()
+		num_gen += 1
+        Elapsed = startsw() - begintime
+	}
+	Num_Total_Gen = num_gen-1
+
+	param_file.printf( "%s: %d\n" , "generations" , Num_Total_Gen )
+	param_file.close()
+ 	print "-------------------------------end of Latin Hypercube Sampling----------------------------------"
+	fv_file.close()
+}
+
+// pair of functions to transfer the pop matrix  
+// to the workers by encoding as a vector
+func get_pop_from_master() { local i, j
+  for i=0, pop.nrow()-1 {
+    for j=0, pop.ncol()-1 {
+      pop.x[i][j] = $o1.x[i*pop.ncol() + j]
+    }
+  }
+  return 0
+}
+
+func send_pop_from_master() { local i, j
+  pop_vec = new Vector(pop.nrow()*pop.ncol())
+  for i=0, pop.nrow()-1 {
+    for j=0, pop.ncol()-1 {
+      pop_vec.x[i*pop.ncol() + j] = pop.x[i][j]
+    }
+  }
+  pc.context("get_pop_from_master", pop_vec)
+  return 0
+}
+
+//---------------------------------initialpopulation, random or from file -----------------	
+proc init_pop(){local i,j
+
+	if(LOAD_GENERATION==0){
+		for (i=0;i<=pop_size-1;i+=1){
+			for (j=0;j<NP;j+=1) {
+				pop.x[i][j]=r[j].repick()
+			}
+		}
+	} else {
+		p_file.ropen("output/curr_population")
+		pop.scanf(p_file)
+		res.scanf(p_file)
+		p_file.close()
+	}
+}
+
+// population being evaluated is either the parent population or the 
+// population of mutants - input variable 0 is parents, 1 is mutants
+proc Evaluate_pop(){local i,j,k,ind,fitVal,which_pop,starttime
+
+	starttime = startsw()
+
+	which_pop = $1
+	
+	printf("Evaluating pop!: %d %d\n", which_pop, num_gen)
+	
+	if (pc.nhost == 1) {    // use the serial form
+		for (i=0;i<=pop_size-1;i+=1){
+			for(j=0;j<=NP-1;j+=1) {
+				transvec.x[j]=pop.x[i][j]
+			}
+			res.x[i]=tfunk()
+		}
+	} else {                  // use the bulletin board form
+		for (i=0;i<=pop_size-1;i+=1){
+			for(j=0;j<=NP-1;j+=1) {
+				transvec.x[j]=pop.x[i][j]
+			}
+			pc.submit( "tfunkpar" , i , transvec )
+		}
+		while ((id = pc.working()) != 0) {
+			pc.look_take(id)
+			if (DEBUG) printf("made it into while\n")
+			ind = pc.upkscalar()
+			if (DEBUG) printf("ind=%d\n",ind)
+			fitVal = pc.upkscalar()
+			if (DEBUG) printf("made it past upkscalars\n")
+			errVec = pc.upkvec()
+			// normalise FFs if desired
+			if ( NORMFFS ) {
+				xopen( "setup/normffs.hoc" )
+				fitVal = errVec.sum
+			}
+			if ( DEBUG ) printf( "collected %d error values\n" , errVec.size() )
+			res.x[ind]=fitVal
+			ffs.setrow( ind , errVec )
+			if (DEBUG) printf("made it past set fitVal\n")
+			if (DEBUG) printf("made it into which_pop\n")
+			fv_file.printf("%d %d ",id,ind)
+			for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+				fv_file.printf( "%1.16f " , pop.x[ ind ][ j ] )
+			}
+			for ( j = 0 ; j <= errVec.size()-1 ; j += 1 ) {
+				fv_file.printf( "%g " , errVec.x[ j ] )
+			}
+			fv_file.printf("%10.2f\n",fitVal)
+			fv_file.flush()
+		}
+	}
+	if (DEBUG) printf("made it out of evaluate pop...\n")
+	printf("Pop evaluated!: %d %d\n", which_pop, num_gen)
+	printf("EvaluatePop: time taken = %f\n", startsw() - starttime)
+}
+
+func tfunk(){local k,fitnessVal
+	fitnessVal=0
+
+	//set parameters
+	sprint( xstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+		} else {
+			sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+		}
+	}
+	sprint( xstr , "%s)" , xstr )
+	execute(xstr)
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+	
+	MRF.p.run()
+	
+	fitnessVal=MRF.p.pf.errval
+	errVec = get_error_values()
+	if ( NORMFFS ) {
+		xopen( "setup/normffs.hoc" )
+		fitnessVal = errVec.sum
+	}
+	
+	fv_file.printf("%d %d ",1,1)
+	for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+		fv_file.printf( "%1.16f " , transvec.x[ j ] )
+	}
+	for ( j = 0 ; j <= errVec.size()-1 ; j += 1 ) {
+		fv_file.printf( "%g " , errVec.x[ j ] )
+	}
+	fv_file.printf("%10.2f\n",fitnessVal)
+	fv_file.flush()
+	
+	return fitnessVal
+}
+
+func tfunkpar(){local i, k, fitnessVal, ind, key	localobj locerrVec
+
+	key = hoc_ac_
+    ind = $1
+    transvec = $o2
+    
+    if (DEBUG) printf("%d: ind=%d\n",pc.id,ind)
+
+	fitnessVal=0
+
+	//set parameters
+	sprint( parstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( parstr , "%stransvec.x[%d]" , parstr , k )
+		} else {
+			sprint( parstr , "%s,transvec.x[%d]" , parstr , k )
+		}
+	}
+	sprint( parstr , "%s)" , parstr )
+	execute( parstr  )
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+	
+	if (DEBUG) printf("made it...1\n")
+	MRF.p.run()
+	if (DEBUG) printf("made it...2\n")
+	fitnessVal=MRF.p.pf.errval
+	locerrVec = get_error_values()
+	
+	pc.pack(ind)
+    pc.pack(fitnessVal)
+    pc.pack(locerrVec)
+    pc.pack(transvec)
+    pc.post(key)
+
+    return key
+}
+
+proc find_best(){local i,j
+	Best = 0
+	for ( i = 1 ; i < pop_size ; i+=1 ) {
+		if ( res.x[ i ] < res.x[ Best ] ) {
+			Best = i
+		}
+	}
+}
+
+/************************************
+ * Output processes and functions
+ ***********************************/
+
+proc save_voltages() { local i, j, k	localobj paramcombs
+
+	// First entry in vtrace file is Best
+	find_best()
+	printf("Saving vTrace %d\n",i)
+	starttimevolt=startsw()	
+	for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[Best][j]
+	sprint( xstr , "outputVtrace(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+		} else {
+			sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+		}
+	}
+	sprint( xstr , "%s)" , xstr )
+	printf(xstr)
+	execute(xstr)
+	printf("Save took %f\n",startsw()-starttimevolt)
+
+	// Then open up parameter combination file and set paramcombs Vector
+	// to contain the parameter sets selected for saving vtraces of
+	sprint( xstr, "%soutput/paramcombs.dat", PARENTDIR )
+	pc_file.ropen( xstr )
+	paramcombs = new Vector()
+	//paramcombs.append(1,29,58,86,114,143,171,199,228,256)
+	paramcombs.scanf(pc_file)
+	pc_file.close()
+
+	for ( i = 1 ; i <= ( pop_size ) ; i += 1 ) {
+		if ( paramcombs.contains(i) ) {
+			printf("Saving vTrace %d\n",i)
+			starttimevolt=startsw()
+			for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[i-1][j]
+			sprint( xstr , "outputVtrace(" )
+			for ( k = 0 ; k < NP ; k += 1 ) {
+				if ( k == 0 ) {
+					sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+				} else {
+					sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+				}
+			}
+			sprint( xstr , "%s)" , xstr )
+			execute(xstr)
+			printf("Save took %f\n",startsw()-starttimevolt)
+		}
+	}
+	vt_file.close()
+}

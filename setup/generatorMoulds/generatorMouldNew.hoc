@@ -1,0 +1,151 @@
+// NB: This MUST be called from a .hoc file that has already set 'gen', 
+// cellname, and somaname... (see optimise/setup/ files)
+
+// Add a generator: (type 0 for Run Fitness)
+MRF.p.addgen(0)
+
+// number of fitness functions present in the generator
+numFits = numFFsInGen.x[ gen ]
+totalFFs += numFits
+
+// objects needed for fitnesses: 
+// FFtype: 1=regionfitness, 2=FRCV, 3=instFR, 4=trajdens, 5=???
+// Tstart is a vector of times to start the fitness functions
+// Tend is a vector of times to end the fitness functions
+// fitParamsX are vectors holding extra information that will be 
+// necessary for fitness functions. These are:
+//	FF1:not used
+//	FF2:1) spikeWinStart; 2) spikeWinEnd; 3) shape; 4) FR; 5) CV scale
+//	FF6:1) apwin.x[0]; 2) apwin.x[1]; 3) spikes; 4) inter; 5) scale
+objref FFtype, Tstart, Tend
+objref fitParams1, fitParams2, fitParams3, fitParams4, fitParams5
+FFtype = new Vector()
+Tstart = new Vector()
+Tend = new Vector()
+fitParams1 = new Vector()
+fitParams2 = new Vector()
+fitParams3 = new Vector()
+fitParams4 = new Vector()
+fitParams5 = new Vector()
+
+strdef dummy
+
+ffNum = 0
+while ( ffNum < numFits ) {
+	fitfunc_file.scanvar()
+	FFtype.append( fitfunc_file.scanvar() )
+	Tstart.append( fitfunc_file.scanvar() )
+	Tend.append( fitfunc_file.scanvar() )
+	fitParams1.append( fitfunc_file.scanvar() )
+	fitParams2.append( fitfunc_file.scanvar() )
+	fitParams3.append( fitfunc_file.scanvar() )
+	fitParams4.append( fitfunc_file.scanvar() )
+	fitParams5.append( fitfunc_file.scanvar() )
+	ffNum = ffNum + 1
+}
+
+xstr = gener.object(gen).s
+
+// Set generator name:
+MRF.p.pf.generatorlist.object(gen).gen.chtitle(xstr)
+
+// Read data from the appropriate generator file
+sprint(xstr, "%sdata/%s.dat", PARENTDIR , xstr)
+f1.ropen(xstr)
+orig_data.scanf(f1)
+f1.close()
+
+// put data on the clipboard
+for i = 0,1 {hoc_obj_[i] = new Vector()}
+hoc_obj_[0].copy(orig_data.getcol(1))   // y data
+hoc_obj_[1].copy(orig_data.getcol(0))   // x data
+
+for fit=0,numFits-1 {
+	
+	/****************************************************
+	 * Possible fitness functions:
+	 * 1: WF error 
+	 * 2: APShpFRCVFitness
+	 * 6: PhasePlane_Fitness
+	 ***************************************************/
+
+	if (FFtype.x(fit)==1) {
+		MRF.p.pf.generatorlist.object(gen).gen.add(somaname, new RegionFitness())
+	} else if (FFtype.x(fit)==2) {
+		MRF.p.pf.generatorlist.object(gen).gen.add(somaname, new APShpFRCVFitness())
+	} else if (FFtype.x(fit)==3) {
+	} else if (FFtype.x(fit)==4) {
+	} else if (FFtype.x(fit)==5) {
+	} else if (FFtype.x(fit)==6) {
+		MRF.p.pf.generatorlist.object(gen).gen.add(somaname, new PhasePlane_Fitness())
+	}
+	
+	// pull data into fitness functions from clipboard
+	MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).clipboard_data()
+	
+	// Set x domains:
+	MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).boundary.x[0] = Tstart.x[fit]
+	MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).boundary.x[1] = Tend.x[fit]
+
+	/**********************************
+	 * Parameters for fitness function:
+	 *********************************/
+	
+	if (FFtype.x(fit)==1) {
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).scale = fitParams3.x[fit]
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).set_w()
+	} else if (FFtype.x(fit)==2) {
+		// Select AP regions for the ApShp functions:
+		// 4 parameters for FRCV - main window, sub window
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).set_apwin_noGUI( fitParams1.x[fit] , fitParams2.x[fit] , 0 , 0 )
+		//Select weightings for APshape, FR and CV for ApShp functions:
+		//AP shape
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).shape_scale=fitParams3.x[fit]
+		//FR
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).frscale=fitParams4.x[fit]
+		//CV
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).cvscale=0
+		//first spike delay
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).delay_pnlty=fitParams5.x[fit]
+	} else if (FFtype.x(fit)==3) {
+		// Select AP regions for the ApShp functions:
+		// 2 parameters for instFR - main window
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).set_apwin_noGUI( fitParams1.x[fit] , fitParams2.x[fit] )
+		
+		//Select weightings for APshape, FR and CV for ApShp functions:
+		//linear(0) or exponential(1) fit
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).FCNTYP = fitParams3.x[fit]
+		//total FR
+		// use tot_frscale for linear fit - gives sum of sq rt of inst. FR diffs
+		// use intcp_scale for exp fit - this gives intercept difference
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).tot_frscale = fitParams4.x[fit]
+		if ( fitParams3.x[ fit ] == 1 ) {
+			MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).intcp_scale = fitParams4.x[fit]
+		}
+		//inst FR slope-around 1000 for lin and around 0.005 for exp (rel to shape)
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).slope_scale = fitParams5.x[fit]
+		//shape
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).shape_scale = 0
+		//first spike delay
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).delay_pnlty = 0
+	} else if (FFtype.x(fit)==4) {
+		
+	} else if (FFtype.x(fit)==5) {
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).set_apwin_noGUI( fitParams1.x[fit] , fitParams2.x[fit] )
+	} else if (FFtype.x(fit)==6) {
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).apwin.x[0] = fitParams1.x[fit]
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).apwin.x[1] = fitParams2.x[fit]
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).spikes = fitParams3.x[fit]
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).inter = fitParams4.x[fit]
+		MRF.p.pf.generatorlist.object(gen).gen.fitnesslist.object(fit).scale = fitParams5.x[fit]
+	}
+}
+
+// Add run statement - constructed from the stimulus name for this
+// model, with the stimulus amplitude appended from stimAmpList
+sprint(xstr,"%s=%s",stimname,stimAmpList.object(gen).s)
+xobj = new RunStatement(1,xstr)
+MRF.p.pf.generatorlist.object(gen).gen.generator.stmtlist.append(xobj)
+
+// Use generator
+MRF.p.pf.generatorlist.object(gen).use = 1

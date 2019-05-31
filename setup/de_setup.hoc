@@ -1,0 +1,1423 @@
+//params and set up for DE
+
+pop_size=256				// size of the population.	
+Cross_prob=0.9				// probability to crossover
+Num_Total_Gen = 1			// Total number of generations to run
+Best=0						// curent best individual
+Elapsed=0					// Total time of run
+F=0.9						// scale factor for differential
+rand_max_pop=16 // maximum number of parameter sets to run in random mode
+max_time=144000		// 40 hours // maximum time to run for, in seconds
+longest_gen=0				// hold longest generation so far, in s
+
+DEBUG=0	//OUTPUT: 0 - no debugging msgs; 1 - all debugging msgs
+
+objref pop,res,mut_pop,mut_res,pop_vec,mut_pop_vec,ffs,mut_ffs,pool,pool_ffs,errVec
+objref pool_ind,transvec,paravec,changed
+objref p_file,pc_file,param_file,g_file,fv_file,sa_file,randomData,scratch_file
+objref iv_file,fi_file,ivout_file,fiout_file,nsde_ff_combs_file
+
+strdef cmd,tstr,parstr
+
+p_file = new File()
+pc_file = new File()
+param_file = new File()
+g_file = new File()
+fv_file = new File()
+sa_file = new File()
+randomData = new File()
+scratch_file = new File()
+iv_file = new File()
+fi_file = new File()
+ivout_file = new File()
+fiout_file = new File()
+nsde_ff_combs_file = new File()
+
+//open main DE log file
+g_file.wopen("../output/de_log.dat")
+
+//open fitnessVal log file
+fv_file.wopen("../output/fvevo.dat")
+
+//open sensitivity analysis log file
+sa_file.wopen("../output/SA.dat")
+
+//File containing random seeds to use
+randomData.ropen("../data/rands.dat")
+
+pop = new Matrix( pop_size , NP )
+mut_pop = new Matrix( pop_size , NP )
+res = new Vector( pop_size , 1e50 )
+mut_res = new Vector( pop_size , 1e50 )
+ffs = new Matrix( pop_size , totalFFs )
+mut_ffs = new Matrix( pop_size , totalFFs )
+pool = new Matrix( ( 2 * pop_size ) , NP )
+pool_ffs = new Matrix( ( 2 * pop_size ) , totalFFs )
+pool_ind = new Vector()
+transvec = new Vector( NP )
+changed = new Vector( pop_size , 1 )
+errVec = new Vector( totalFFs )
+
+// random numbers and initial boundaries for the population
+objref  r[NP],ru[pc.nhost()]
+
+// initialise a random number generator for each parameter
+for j=0,(NP-1){
+	r[j] = new Random(randomData.scanvar())
+	r[j].uniform(minvec.x[j],maxvec.x[j])
+}
+
+// initialise a random number generator for each parallel host
+for j=0,(pc.nhost()-1){
+	ru[j] = new Random(randomData.scanvar())
+	ru[j].uniform(0,1)
+}
+
+// close the random number file
+randomData.close()
+
+LOAD_GENERATION=0	// if zero generates random initial population, if one load generation from file
+
+num_gen=0
+
+//=======================MAIN LOOP FOR DE================================
+proc DE() { local i,j,k
+
+	init_pop()
+	
+	// make file of DE parameters for producing output figures
+	param_file.wopen( "output/metaparams.dat" )
+	param_file.printf( "%s: %d\n" , "population" , pop_size ) 
+	param_file.printf( "%s: %d\n" , "parameters" , NP )
+	param_file.printf( "%s: %d\n" , "generators" , NGens )
+	param_file.printf( "%s: %d\n" , "totalFFs" , totalFFs )
+	param_file.printf( "%s: %d\n" , "totalT" , (Tend.max()/voltvecdt) )
+	param_file.printf( "%s: %d\n" , "MRF" , MRFflag )
+	param_file.printf( "%s: %g\n" , "dt" , voltvecdt)
+
+	begintime = startsw()
+	
+	Evaluate_pop(0)
+	print_pop()
+	num_gen += 1
+
+	//while(num_gen<=Num_Total_Gen){	// termination criterion besed on fixed # Generations
+    //while(Best>10){				  // termination criterion besed on target score
+	while ( ( Elapsed + ( 2 * longest_gen ) ) < max_time ) {
+		startgentime = startsw()
+		//Evaluate_pop(0)
+       	Mutants()
+        Evaluate_pop(1)
+       	Merge_pops()
+       	gen_time = startsw() - startgentime
+       	if ( gen_time > longest_gen ) { longest_gen = gen_time }
+       	find_best()
+		print_things()
+		print_pop()
+		num_gen += 1
+        Elapsed = startsw() - begintime
+	}
+	Num_Total_Gen = num_gen-1
+	
+	param_file.printf( "%s: %d\n" , "generations" , Num_Total_Gen )
+	param_file.close()
+ 	print "-------------------------------end of Differential Evolution----------------------------------"
+	for (j=0;j<=NP-1;j+=1) g_file.printf("%10.10f ",pop.x[Best][j])
+	g_file.printf("%10.10f ",res.x[Best])
+    g_file.printf("\n")
+	g_file.close()
+	fv_file.close()
+}
+
+//=======================MAIN LOOP FOR NSDE================================
+proc NSDE() { local i,j,k
+	
+	init_pop()
+	
+	// make file of DE parameters for producing output figures
+	param_file.wopen( "output/metaparams.dat" )
+	param_file.printf( "%s: %d\n" , "population" , pop_size ) 
+	param_file.printf( "%s: %d\n" , "parameters" , NP )
+	param_file.printf( "%s: %d\n" , "generators" , NGens )
+	param_file.printf( "%s: %d\n" , "totalFFs" , totalFFs )
+	param_file.printf( "%s: %d\n" , "totalT" , (Tend.max()/voltvecdt) )
+	param_file.printf( "%s: %d\n" , "MRF" , MRFflag )
+	param_file.printf( "%s: %g\n" , "dt" , voltvecdt)
+
+	begintime=startsw()
+	
+	Evaluate_pop(0)
+	print_pop()
+	num_gen += 1
+
+	//while(num_gen<=Num_Total_Gen){	// termination criterion besed on fixed # Generations
+    //while(Best>10){				  // termination criterion besed on target score
+	while ( ( Elapsed + ( 2 * longest_gen ) ) < max_time ) {
+		startgentime = startsw()
+		//Evaluate_pop(0)
+       	Mutants()
+       	Evaluate_pop(1)
+       	non_dominated_sorting()
+       	Merge_pops_NSDE()
+       	gen_time = startsw() - startgentime
+       	if ( gen_time > longest_gen ) { longest_gen = gen_time }
+       	find_best()
+		print_things()
+		print_pop()
+		num_gen += 1
+        Elapsed = startsw() - begintime
+	}
+	Num_Total_Gen = num_gen-1
+	
+	param_file.printf( "%s: %d\n" , "generations" , Num_Total_Gen )
+	param_file.close()
+ 	print "-------------------------------end of Differential Evolution----------------------------------"
+	for (j=0;j<=NP-1;j+=1) g_file.printf("%10.10f ",pop.x[Best][j])
+	g_file.printf("%10.10f ",res.x[Best])
+    g_file.printf("\n")
+	g_file.close()
+	fv_file.close()
+}
+
+/***************************************
+ * NSDE processes and functions
+ **************************************/
+// Assign fitness values to individuals based on their level of non-domination
+// within the pool of both population and mutants
+proc non_dominated_sorting() { local i , j , pool_ind_size	localobj curr_rank_ind
+	DEBUG=0
+	starttime = startsw()
+	
+	printf("Non-dominated sorting: start\n")
+	
+	// set up curr_rank_ind as an empty Vector
+	curr_rank_ind = new Vector()
+	
+	// fill pool and pool_ffs with the values from pop, mut_pop, ffs, mut_ffs
+	for ( i = 0 ; i < ( 2 * pop_size ) ; i+=1 ) {
+		if ( i < pop_size ) {
+			pool.setrow( i , pop.getrow( i ) )
+			pool_ffs.setrow( i , ffs.getrow( i ) )
+		} else {
+			pool.setrow( i , mut_pop.getrow( i - pop_size ) )
+			pool_ffs.setrow( i , mut_ffs.getrow( i - pop_size ) )
+		}
+	}
+	if (DEBUG) pool.printf
+	if (DEBUG) pool_ffs.printf
+	
+	// set pool_ind vector to every index in pool
+	pool_ind.indgen( 0 , ( ( pop_size * 2 ) - 1 ) , 1 )
+	if (DEBUG)pool_ind.printf
+
+	// initialise rank variable
+	rank = 1
+	
+	// start while loop for having individuals left in the pool
+	while ( pool_ind.size > 0 ) {
+		
+		// set the pool size for this iteration
+		pool_ind_size = pool_ind.size
+		// reset curr_rank_ind
+		curr_rank_ind.resize(0)
+		if (DEBUG) printf( "NS rank = %d; pool size = %d\n" , rank , pool_ind_size )
+		
+		// non-domination testing:
+		// for each member remaining in the pool:
+		for ( i = 0 ; i < pool_ind_size ; i+=1 ) {
+			// is this individual dominated by any others in the pool?
+			if ( is_dominated( pool_ind.x[ i ] ) == 0 ) {
+				curr_rank_ind.append( pool_ind.x[ i ] )
+			}
+		}
+		
+		// check if there are any currently non-dominated individuals...
+		if ( curr_rank_ind.size == 0 ) {
+			// if there are no dominant individuals, set all to current rank
+			curr_rank_ind = pool_ind.c
+		}
+		
+		if (DEBUG) curr_rank_ind.printf
+		
+		// for each currently non-dominated individual, set fitness to rank
+		for ( i = 0 ; i < ( pop_size * 2 ) ; i+=1 ) {
+			if ( curr_rank_ind.contains( i ) ) {
+				if ( i < pop_size ) {
+					res.x[ i ] = rank
+				} else {
+					mut_res.x[ i - pop_size ] = rank
+				}
+			}
+		}
+		
+		// adjust ranks using a specified method for curr_rank_ind mini-pool
+		// Methods:	1 = crowdedness in fitness space
+		//			2 = total combined fitness (normalised per FF)
+		//adjust_res_for_mini_pool( curr_rank_ind , 1 )
+		
+		// remove members of mini-pool from pool_ind
+		for ( i = 0 ; i < curr_rank_ind.size ; i+=1 ) {
+			if ( pool_ind.contains( curr_rank_ind.x[ i ] ) ) {
+				pool_ind.remove( pool_ind.indwhere( "==" , curr_rank_ind.x[ i ] ) )
+			}
+		}
+		
+		// increment the rank variable
+		rank += 1
+	}
+	
+	// actually we want to calculate rankings for e.g. crowdedness using the 
+	// entire pool, not just the mini-pools. So here we submit the whole pool 
+	// to the process:
+	pool_ind.indgen( 0 , ( ( pop_size * 2 ) - 1 ) , 1 )
+	adjust_res_for_mini_pool( pool_ind , 1)
+	
+	if (DEBUG) res.printf
+	if (DEBUG) mut_res.printf
+	
+	DEBUG=0
+	printf("Non-dominated sorting: time taken: %f\n", startsw() - starttime)
+}
+
+// Check is an individual is dominated by any other members of the pool - takes 
+// index i into 'pool' as input, and returns 1 if true and 0 if false
+func is_dominated() { local i , j , output_is_dominated
+	i = $1
+	output_is_dominated = 0
+	if (DEBUG) printf( "Domination test %d:\n" , i )
+	for ( j = 0 ; j < pool_ind.size ; j+=1 ) {
+		if ( dominates( pool_ind.x[ j ] , i ) ) {
+			output_is_dominated = 1
+		}
+	}
+	if (DEBUG) printf( "%d is_dominated = %d\n" , i , output_is_dominated )
+	return output_is_dominated
+}
+
+// Check if an individual dominates another individual - takes indices to two 
+// individuals indexed into 'pool' as two input integers, and returns 1 if $1 
+// dominates $2 and 0 if not
+// NSDE_COMB_FFS tells us whether we want to look up the file 'nsde_ff_combs.dat'
+// to get sets of FFs that should be summed prior to determining dominance.
+func dominates() { local i , j , better , worse , output_dominates , num_groups	, \
+				   groupsum1 , groupsum2	\
+				   localobj groups_vec
+	better = 0
+	worse = 0
+	DEBUG=0
+	// better is if $1 < $2 - this direction is caused by use of 'error' func.
+	// i.e. error should be minimised
+	if ( NSDE_COMB_FFS == 0 ) {
+		for ( i = 0 ; i < totalFFs ; i+=1 ) {
+			if ( pool_ffs.x[ $1 ][ i ] < pool_ffs.x[ $2 ][ i ] ) {
+				better+=1
+			} else if ( pool_ffs.x[ $1 ][ i ] > pool_ffs.x[ $2][ i ] ) {
+				worse+=1
+			}
+		}
+	} else if ( NSDE_COMB_FFS == 1 ) {
+		if (DEBUG) printf( "Combining FFs into groups...\n" )
+		nsde_ff_combs_file.ropen("setup/nsde_ff_combs.dat")
+		groups_vec = new Vector()
+		groups_vec.scanf( nsde_ff_combs_file )
+		num_groups = groups_vec.max
+		if (DEBUG) printf( "num_groups = %d\n" , num_groups )
+		for ( j = 1 ; j <= num_groups ; j+=1 ) {
+			if (DEBUG) printf( "group %d:\n" , j )
+			groupsum1 = 0
+			groupsum2 = 0
+			for ( i = 0 ; i < totalFFs ; i+=1 ) {
+				if ( groups_vec.x[ i ] == j ) {
+					if (DEBUG) printf( "FF %d in group %d: adding %f to group 1 and %f to group 2\n" , \
+										i , j , pool_ffs.x[ $1 ][ i ] , pool_ffs.x[ $2 ][ i ] )
+					groupsum1 += pool_ffs.x[ $1 ][ i ]
+					groupsum2 += pool_ffs.x[ $2 ][ i ]
+				}
+			}
+			if (DEBUG) printf( "groupsum1: %f : groupsum2 : %f\n" , groupsum1 , groupsum2 )
+			if ( groupsum1 < groupsum2 ) {
+				better += 1
+			} else if ( groupsum1 > groupsum2 ) {
+				worse += 1
+			}
+		}
+	}
+	
+	if ( ( worse == 0 ) && ( better > 0 ) ) {
+		output_dominates = 1
+	} else {
+		output_dominates = 0
+	}
+	if (DEBUG) printf( "Dominates : %d vs %d : better = %d ; worse = %d : dominates = %d\n" , \
+								$1 , $2 , better , worse , output_dominates )
+	DEBUG=0
+	return output_dominates
+}
+
+// Calculate the crowdedness of each individual in a pool_ffs, with the indices 
+// into the 'pool_ffs' object provided as argument. Returns vector of crowdedness.
+obfunc simple_crowdedness() { 	local i , j , curr_val, above , above_ind , below , \
+						below_ind , distance	localobj crowdedness_vec , \
+						ind_pool_ffs , ind_dest , pool_ffs_col , ind_pool_ffs_col , \
+						ind_pool_ffs_col_sorted_index
+	ind_pool_ffs = $o1
+	if (DEBUG) ind_pool_ffs.printf
+	ind_dest = new Vector( ind_pool_ffs.size )
+	if ( ind_dest.size == 1 ) {
+		ind_dest.x[ 0 ] = 0
+	} else {
+		ind_dest.indgen( 0 , ( ind_pool_ffs.size - 1 ) , 1 )
+	}
+	if (DEBUG) ind_dest.printf
+	crowdedness_vec = new Vector( ind_pool_ffs.size )
+	pool_ffs_col = new Vector( pop_size * 2 )
+	ind_pool_ffs_col = new Vector( ind_pool_ffs.size )
+	ind_pool_ffs_col_sorted_index = new Vector( ind_pool_ffs.size )
+	
+	// simple crowdedness metric is calculated according to:
+	// 	for an individual, for an objective function:
+	//		find the adjacent objective function values in the rest of the pool_ffs
+	//		subtract the value one above from the value one below
+	//		add this to the total crowdedness score
+	//		lower is worse
+	//		if there is no bigger or smaller value in the pool_ffs, 
+	//			crowdedness score gets an arbitrarily large value added to it
+	
+	for ( i = 0 ; i < ind_pool_ffs.size ; i+=1 ) {
+		crowdedness_vec.x[ i ] = 0
+		for ( j = 0 ; j < totalFFs ; j+=1 ) {
+			// get a column from pool_ffs of the current ff values (j), 
+			// according to the indices in ind
+			pool_ffs_col = pool_ffs.getcol( j )
+			if (DEBUG) pool_ffs_col.printf
+			// copy members of the ff col that are part of the source pool into
+			// the target pool at indices given by ind_dest,0:size of the vector-1
+			ind_pool_ffs_col.copy( pool_ffs_col , ind_pool_ffs , ind_dest )
+			if (DEBUG) ind_pool_ffs_col.printf
+			// scale so that all distances are normalised - so each ff is the same
+			ind_pool_ffs_col.scale( 0 , 1 )
+			if (DEBUG) ind_pool_ffs_col.printf
+			// current value for finding crowdedness
+			//curr_val = ind_pool_ffs_col.x[ i ]
+			// sort the pool_ffs so we can find one above and one below
+			// get the sorted indices so that we can find our original value
+			ind_pool_ffs_col_sorted_index = ind_pool_ffs_col.sortindex()
+			ind_of_orig = ind_pool_ffs_col_sorted_index.x[ i ]
+			if (DEBUG) ind_pool_ffs_col.printf
+			// check if we're at the bottom of the pile:
+			if ( ind_of_orig == 0 ) {
+				below_ind = -1
+			} else {
+				below_ind = ind_pool_ffs_col_sorted_index.x[ i - 1 ]
+			}
+			//printf("i=%d j=%d\n",i,j)
+			// also check if we're at the top of the pile:
+			if ( ind_of_orig == ( ind_pool_ffs.size - 1 ) ) {
+				above_ind = -1
+			} else {
+				//printf("made it \n")
+				above_ind = ind_pool_ffs_col_sorted_index.x[ i - 1 ]
+			}
+			// if ind_of_orig is at the top or bottom, add a big number
+			if ( ( above_ind == -1 ) || ( below_ind == -1 ) ) {
+				crowdedness_vec.x[ i ] += totalFFs
+			} else {
+				// else find how crowded it is
+				above = ind_pool_ffs_col.x[ above_ind ]
+				below = ind_pool_ffs_col.x[ below_ind ]
+				crowdedness_vec.x[ i ] += ( above - below )
+			}
+		}
+	}
+	if (DEBUG) crowdedness_vec.printf
+	// scale the crowdedness values so that they don't change rank by too much
+	if ( crowdedness_vec.min == crowdedness_vec.max ) {
+		crowdedness_vec.fill( 1 )
+	} else {
+		crowdedness_vec.scale( 	( 1 - ( 1 / ( ( 2 * pop_size ) + 1 ) ) ) , \
+								( 1 + ( 1 / ( ( 2 * pop_size ) + 1 ) ) ) )
+	}
+	if (DEBUG) crowdedness_vec.printf
+	return crowdedness_vec
+}
+
+// Calculate the total fitness of each individual in a pool_ffs, with the 
+// indices into the 'pool_ffs_ffs' object provided as argument. Returns vector 
+// of total fitnesses
+obfunc total_fitness() { 	local i , j , curr_val, above , above_ind , below , \
+						below_ind , distance	localobj total_fitness_vec , \
+						ind_pool_ffs , ind_dest , pool_ffs_col , ind_pool_ffs_col
+	ind_pool_ffs = $o1
+	if (DEBUG) ind_pool_ffs.printf
+	ind_dest = new Vector( ind_pool_ffs.size )
+	if ( ind_dest.size == 1 ) {
+		ind_dest.x[ 0 ] = 0
+	} else {
+		ind_dest.indgen( 0 , ( ind_pool_ffs.size - 1 ) , 1 )
+	}
+	if (DEBUG) ind_dest.printf
+	total_fitness_vec = new Vector( ind_pool_ffs.size )
+	total_fitness_vec.fill( 0 )
+	pool_ffs_col = new Vector( pop_size * 2 )
+	ind_pool_ffs_col = new Vector( ind_pool_ffs.size )
+	
+	// total fitness metric is calculated according to:
+	// 	for an FF:
+	//		normalise the FF range to 0:1
+	//		for an individual:
+	//			add the current FF score to his total fitness score
+	
+	for ( j = 0 ; j < totalFFs ; j+=1 ) {
+		// get a column from pool_ffs of the current FF values (j), 
+		// according to the indices in ind
+		pool_ffs_col = pool_ffs.getcol( j )
+		if (DEBUG) pool_ffs_col.printf
+		ind_pool_ffs_col.copy( pool_ffs_col , ind_pool_ffs , ind_dest )
+		if (DEBUG) ind_pool_ffs_col.printf
+		// scale so that the FF is normalised, with better values as bigger numbers
+		ind_pool_ffs_col.scale( 1 , 0 )
+		// and set to 0 if the scale didn't work
+		if ( ind_pool_ffs_col.min == ind_pool_ffs_col.max ) {
+			ind_pool_ffs_col.fill( 0 )
+		}
+		if (DEBUG) ind_pool_ffs_col.printf
+		// for each individual:
+		for ( i = 0 ; i < ind_pool_ffs.size ; i+=1 ) {
+			total_fitness_vec.x[ i ] += ind_pool_ffs_col.x[ i ]
+		}
+	}
+	
+	if (DEBUG) total_fitness_vec.printf
+	// check if all fitness values are identical, in which case, fine, set to 1
+	// scale fitness values in a range appropriate to the amount of potential
+	// non-domination ranks that might be present, according to population size
+	if ( total_fitness_vec.min == total_fitness_vec.max ) {
+		total_fitness_vec.fill( 1 )
+	} else {
+		total_fitness_vec.scale( 	( 1 - ( 1 / ( ( 2 * pop_size ) + 1 ) ) ) , \
+								( 1 + ( 1 / ( ( 2 * pop_size ) + 1 ) ) ) )
+	}
+	if (DEBUG) total_fitness_vec.printf
+	return total_fitness_vec
+}
+
+// Adjust res and mut_res values based on the crowdedness of a mini-pool with 
+// the indices into 'pool' for the mini-pool supplied as an argument
+proc adjust_res_for_mini_pool() { local i , j , method	localobj ind , modifier
+	
+	ind = $o1
+	method = $2
+	
+	// call appropriate method here - modifier should be high for strong indivs
+	if ( method == 1 ) {	
+		modifier = simple_crowdedness( ind )
+	} else if ( method == 2 ) {
+		modifier = total_fitness( ind )
+	}
+	
+	j = 0
+	
+	for ( i = 0 ; i < ( pop_size * 2 ) ; i+=1 ) {
+		if ( ind.contains( i ) ) {
+			// use divide by modifier because modifier of greater than 1 
+			// indicates better result, and res.x[] values should be low
+			if ( i < pop_size ) {
+				res.x[ i ] = ( res.x[ i ] / modifier.x[ j ] )
+			} else {
+				mut_res.x[ i - pop_size ] = ( mut_res.x[ i - pop_size ] / \
+														modifier.x[ j ] )
+			}
+			j+=1
+		}
+	}
+}
+
+/************************************
+ * DE processes and functions
+ ***********************************/
+
+// Main DE function to generate a new mutant population using the 
+// standard DE algorithm
+proc Mutants() {local i,j,inside,outside,starttime,x,y,z,num_muts_gend
+
+	starttime = startsw()
+	num_muts_gend=0
+	printf("Mutants: start\n")
+	//parallel version isn't faster unless > 1000 cpus are available...
+	//even then it is barely faster...
+	// serial version:
+
+	if (pc.nhost<1000) {
+		if (DEBUG) printf("Mutants: made it, serial\n")
+		for (i=0;i<pop_size;i+=1) {
+			if (DEBUG) printf("Population member: %d\n",i)
+			inside = 0 
+			while ( inside == 0 ) {
+				mutate( i )
+				num_muts_gend += 1
+				if (DEBUG) printf("    Generated a mutant\n")
+				if (DEBUG) printf("    Generated %d mutants so far\n",num_muts_gend)
+				outside = 0
+				// loop through each parameter and check that none are outside boundaries
+				for ( j = 0; j < NP; j += 1 ) {
+					if (DEBUG) printf("param: %f; max: %f; min: %f\n",mut_pop.x[i][j],maxvec.x[j],minvec.x[j])
+					if ( mut_pop.x[i][j] < minvec.x[j] ) {
+						outside = 1
+						if (DEBUG) printf("    Parameter %d outside lower boundary\n",j)
+					} else if ( mut_pop.x[i][j] > maxvec.x[j] ) {
+						outside = 1
+						if (DEBUG) printf("    Parameter %d outside upper boundary\n",j)
+					}
+				}
+				if ( outside == 0 ) {
+					inside = 1
+					if (DEBUG) printf("All parameters inside boundaries!\n")
+				}
+			}
+		} // end of pop_size for loop (i)
+	} else { // bulletin board version:
+
+		send_pop_from_master()
+
+		for (i=0;i<pop_size;i+=1) {
+			pc.submit("mutPar", i)
+		}
+		while ((id = pc.working()) != 0) {
+			pc.look_take(id)
+			ind = pc.upkscalar()
+			transvec = pc.upkvec()
+			for (j=0;j<NP;j+=1) {
+				mut_pop.x[ind][j] = transvec.x[j]
+			}
+		}
+	}
+
+	printf("Mutants: mutants generated: %d\n", num_muts_gend)
+	printf("Mutants: time taken: %f\n", startsw() - starttime)
+}
+
+proc mutate() { local i, j, r0, r1, r2, jrand
+	r0 = $1	
+	r1 = $1	
+	r2 = $1	
+
+	while ( r0 == $1 ) {
+		r0 = int( ru[0].repick() * pop_size )
+	}
+	while ( r1 == $1 ) {
+		r1 = int( ru[0].repick() * pop_size )
+	}
+	while ( r2 == $1 ) {
+		r2 = int( ru[0].repick() * pop_size )
+	}
+
+	// pick parameter to make sure at least one is mutated
+	jrand = int( ru[0].repick()*NP )
+
+	// loop through each parameter and generate the mutant vector
+	for ( j = 0; j < NP; j += 1 ) {
+		if ( ru[0].repick() <= Cross_prob || j == jrand ) {
+			mut_pop.x[$1][j] = ( pop.x[r0][j] + ( F * ( pop.x[r1][j] - pop.x[r2][j] ) ) )
+		} else {
+			mut_pop.x[$1][j] = pop.x[$1][j]
+		}
+	}
+}
+
+// pair of functions to transfer the pop matrix  
+// to the workers by encoding as a vector
+func get_pop_from_master() { local i, j
+  for i=0, pop.nrow()-1 {
+    for j=0, pop.ncol()-1 {
+      pop.x[i][j] = $o1.x[i*pop.ncol() + j]
+    }
+  }
+  return 0
+}
+
+func send_pop_from_master() { local i, j
+  pop_vec = new Vector(pop.nrow()*pop.ncol())
+  for i=0, pop.nrow()-1 {
+    for j=0, pop.ncol()-1 {
+      pop_vec.x[i*pop.ncol() + j] = pop.x[i][j]
+    }
+  }
+  pc.context("get_pop_from_master", pop_vec)
+  return 0
+}
+
+// pair of functions to transfer the pop matrix  
+// to the workers by encoding as a vector
+func get_mut_pop_from_master() { local i, j
+  for i=0, mut_pop.nrow()-1 {
+    for j=0, mut_pop.ncol()-1 {
+      mut_pop.x[i][j] = $o1.x[i*mut_pop.ncol() + j]
+    }
+  }
+  return 0
+}
+
+func send_mut_pop_from_master() { local i, j
+  mut_pop_vec = new Vector(mut_pop.nrow()*mut_pop.ncol())
+  for i=0, mut_pop.nrow()-1 {
+    for j=0, mut_pop.ncol()-1 {
+      mut_pop_vec.x[i*mut_pop.ncol() + j] = mut_pop.x[i][j]
+    }
+  }
+  pc.context("get_pop_from_master", mut_pop_vec)
+  return 0
+}
+
+func mutPar(){local ind,key,r0,r1,r2,i,j	localobj mutvec
+	key = hoc_ac_
+    ind = $1
+
+	mutvec = new Vector(NP)
+
+	//pick base indices for the mutant to make the while loops work:
+	r0=ind
+	r1=ind
+	r2=ind
+	while (r0==ind) {
+		r0 = int(ru[pc.id].repick()*pop_size)
+	}
+	while (r1==ind || r1==r0) {
+		r1 = int(ru[pc.id].repick()*pop_size)
+	}
+	while (r2==ind || r2==r0 || r2==r1) {
+		r2 = int(ru[pc.id].repick()*pop_size)
+	}
+	//pick parameter to make sure at least one comes from mutant 
+	jrand=int(ru[pc.id].repick()*NP)
+
+	// loop through each parameter and generate the mutant vector
+	for (j=0;j<NP;j+=1)	{
+		if (ru[pc.id].repick()<=Cross_prob || j==jrand) {
+			mutvec.x[j]=(pop.x[r0][j]+(F*(pop.x[r1][j]-pop.x[r2][j])))
+			if (mutvec.x[j]<=minvec.x[j]) {//if mut param is -ve...
+				mutvec.x[j]=minvec.x[j] //...make it +ve again
+			} else if (mutvec.x[j]>maxvec.x[j]) {//if mut param is huge
+				mutvec.x[j]=maxvec.x[j] //reign it in
+			}
+		} else {
+			mutvec.x[j]=pop.x[ind][j]
+		}
+	}//end of NP for loop (j)
+
+	pc.pack(ind)
+	pc.pack(mutvec)
+    pc.post(key)
+    return key
+}
+
+// For every index in the population, checks which is fitter out of 
+// the parent and the mutant - saves the fitter one in the pop matrix
+proc Merge_pops() {local i
+	for ( i = 0 ; i < pop_size ; i += 1 ) {
+		//printf("Merging : %d : pop: %f vs %f mut\n",i,res.x[i],mut_res.x[i])
+		if ( mut_res.x[ i ] < res.x[ i ] ) {
+			res.x[ i ] = mut_res.x[ i ]
+			ffs.setrow( i , mut_ffs.getrow( i ) )
+			for ( j = 0 ; j <= NP - 1 ; j += 1 ) {
+				pop.x[ i ][ j ] = mut_pop.x[ i ][ j ]
+			}
+			changed.x[ i ] = 1
+		} else {
+			changed.x[ i ] = 0
+		}
+	}
+}
+
+// Combine the two pools, pop and mut, and then take top pop_size members of 
+// this combined pool to be the new pop
+proc Merge_pops_NSDE() { local i , ind	localobj combPops_res , combPops_sort_ind , tempPop , tempPop_res , tempPop_ffs
+	// temporary vectors for holding things while sorting
+	combPops_res = new Vector()
+	combPops_sort_ind = new Vector()
+	tempPop = new Matrix( pop_size , NP )
+	tempPop_res = new Vector()
+	tempPop_ffs = new Matrix( pop_size , totalFFs )
+	
+	// combine the results lists into one big one and then sort them all
+	combPops_res.append( res )
+	combPops_res.append( mut_res )
+	combPops_res.sortindex( combPops_sort_ind )
+	
+	// now we're taking the top pop_size members of the population, and putting 
+	// them into one new population
+	for ( i = 0 ; i < pop_size ; i += 1 ) {
+		ind = combPops_sort_ind.x[ i ]
+		if ( ind < pop_size ) {
+			tempPop_res.append( res.x[ ind ] )
+			tempPop_ffs.setrow( i , ffs.getrow( ind ) )
+			tempPop.setrow( i , pop.getrow( ind ) )
+		} else {
+			tempPop_res.append( mut_res.x[ ( ind - pop_size ) ] )
+			tempPop_ffs.setrow( i , mut_ffs.getrow( ( ind - pop_size ) ) )
+			tempPop.setrow( i , mut_pop.getrow( ( ind - pop_size ) ) )
+		}
+	}
+	pop = tempPop
+	res = tempPop_res
+	ffs = tempPop_ffs
+}
+
+//---------------------------------initialpopulation, random or from file -----------------	
+proc init_pop(){local i,j
+
+	if(LOAD_GENERATION==0){
+		for (i=0;i<=pop_size-1;i+=1){
+			for (j=0;j<NP;j+=1) {
+				pop.x[i][j]=r[j].repick()
+			}
+		}
+	} else {
+		p_file.ropen("output/curr_population")
+		pop.scanf(p_file)
+		res.scanf(p_file)
+		p_file.close()
+	}
+}
+
+proc print_pop(){local i , j
+	for ( i = 0 ; i <= pop_size-1 ; i += 1 ) {
+		fv_file.printf( "%d %d " , num_gen , i )
+		for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+			fv_file.printf( "%1.16f " , pop.x[ i ][ j ] )
+		}
+		errVec = ffs.getrow( i )
+		for ( j = 0 ; j <= totalFFs-1 ; j += 1 ) {
+			fv_file.printf( "%g " , ffs.x[ i ][ j ] )
+		}
+		if (MULOBJ) {
+			fv_file.printf( "%g\n" , errVec.sum() )
+		} else {
+			fv_file.printf( "%g\n" , res.x[ i] )
+		}
+		fv_file.flush()
+	}
+}
+
+// population being evaluated is either the parent population or the 
+// population of mutants - input variable 0 is parents, 1 is mutants
+proc Evaluate_pop(){local i,j,k,ind,fitVal,which_pop,starttime
+
+	starttime = startsw()
+
+	which_pop = $1
+	
+	printf("Evaluating pop!: %d %d\n", which_pop, num_gen)
+	
+	if (pc.nhost == 1) {    // use the serial form
+		for (i=0;i<=pop_size-1;i+=1){
+			if (which_pop == 0) {
+				for(j=0;j<=NP-1;j+=1) {
+					transvec.x[j]=pop.x[i][j]
+				}
+				res.x[i]=tfunk()
+			} else {
+				for(j=0;j<=NP-1;j+=1) {
+					transvec.x[j]=mut_pop.x[i][j]
+				}
+				mut_res.x[i]=tfunk()
+			}
+		}
+	} else {                  // use the bulletin board form
+		for (i=0;i<=pop_size-1;i+=1){
+			if (which_pop == 0) {
+				for(j=0;j<=NP-1;j+=1) {
+					transvec.x[j]=pop.x[i][j]
+				}
+			} else {
+				for(j=0;j<=NP-1;j+=1) {
+					transvec.x[j]=mut_pop.x[i][j]
+				}
+			}
+			pc.submit( "tfunkpar" , i , transvec )
+		}
+		while ((id = pc.working()) != 0) {
+			pc.look_take(id)
+			if (DEBUG) printf("made it into while\n")
+			ind = pc.upkscalar()
+			if (DEBUG) printf("ind=%d\n",ind)
+			fitVal = pc.upkscalar()
+			if (DEBUG) printf("made it past upkscalars\n")
+			errVec = pc.upkvec()
+			// normalise FFs if desired
+			if ( NORMFFS ) {
+				xopen( "setup/normffs.hoc" )
+				fitVal = errVec.sum
+			}
+			if ( DEBUG ) printf( "collected %d error values\n" , errVec.size() )
+			if (which_pop == 0) {
+				res.x[ind]=fitVal
+				ffs.setrow( ind , errVec )
+			} else {
+				mut_res.x[ind]=fitVal
+				mut_ffs.setrow( ind , errVec )
+			}
+			if (DEBUG) printf("made it past set fitVal\n")
+		}
+	}
+	if (DEBUG) printf("made it out of evaluate pop...\n")
+	printf("Pop evaluated!: %d %d\n", which_pop, num_gen)
+	printf("EvaluatePop: time taken = %f\n", startsw() - starttime)
+}
+
+func tfunk(){local k,fitnessVal
+	fitnessVal=0
+	
+	//set parameters
+	sprint( xstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+		} else {
+			sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+		}
+	}
+	sprint( xstr , "%s)" , xstr )
+	execute(xstr)
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+	
+	MRF.p.run()
+	
+	fitnessVal=MRF.p.pf.errval
+	errVec = get_error_values()
+	if ( NORMFFS ) {
+		xopen( "setup/normffs.hoc" )
+		fitnessVal = errVec.sum
+	}
+	
+	fv_file.printf("%d %d ",1,1)
+	for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+		fv_file.printf( "%1.16f " , transvec.x[ j ] )
+	}
+	for ( j = 0 ; j <= errVec.size()-1 ; j += 1 ) {
+		fv_file.printf( "%g " , errVec.x[ j ] )
+	}
+	fv_file.printf("%10.2f\n",fitnessVal)
+	fv_file.flush()
+	
+	return fitnessVal
+}
+
+func tfunkpar(){local i, k, fitnessVal, ind, key	localobj locerrVec
+
+	key = hoc_ac_
+    ind = $1
+    transvec = $o2
+    
+    if (DEBUG) printf("%d: ind=%d\n",pc.id,ind)
+
+	fitnessVal=0
+
+	//set parameters
+	sprint( parstr , "set_n_params(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( parstr , "%stransvec.x[%d]" , parstr , k )
+		} else {
+			sprint( parstr , "%s,transvec.x[%d]" , parstr , k )
+		}
+	}
+	sprint( parstr , "%s)" , parstr )
+	execute( parstr  )
+
+	//adjust conductances
+	set_conds()
+	//adjust kinetics
+	set_kins()
+	
+	if (DEBUG) printf("made it...1\n")
+	MRF.p.run()
+	if (DEBUG) printf("made it...2\n")
+	fitnessVal=MRF.p.pf.errval
+	locerrVec = get_error_values()
+	
+	pc.pack(ind)
+    pc.pack(fitnessVal)
+    pc.pack(locerrVec)
+    pc.pack(transvec)
+    pc.post(key)
+
+    return key
+}
+
+// output function
+proc print_things() { local j
+
+	// Add best result of this generation to the list
+
+	//printf("[Generation # %g]  ",num_gen)
+	g_file.printf( "%g\t  " , num_gen )
+	for ( j = 0 ; j <= NP - 1 ; j+=1 ) {
+		//printf("%10.5f \t",best_indiv.x[j]) 
+		g_file.printf( "%1.16f \t" , pop.x[ Best ][ j ] )
+
+        //prax_par[j]=best_indiv.x[j]
+	}
+	//printf("%15.7e\n",Best)
+	//g_file.printf("%10.2f\n",res.x[Best])
+	g_file.printf( "%10.2f\n" , ffs.getrow( Best ).sum )
+	g_file.flush()
+	//pop.printf("%5.6f ")
+	
+	// Overwrite the whole of the current population for resuming
+	// or for making vtraces.dat
+	p_file.wopen( "output/curr_population" )
+	pop.fprint( p_file , "%g\t" , "\n" )
+	res.printf( p_file , "%g\n" )
+	p_file.close()
+}
+
+proc find_best(){local i,j
+	Best = 0
+	for ( i = 1 ; i < pop_size ; i+=1 ) {
+		if ( res.x[ i ] < res.x[ Best ] ) {
+			Best = i
+		}
+	}
+}
+
+/************************************
+ * Output processes and functions
+ ***********************************/
+
+proc save_voltages() { local i, j, k , ind	localobj paramcombs
+
+	// First entry in vtrace file is Best
+	find_best()
+	printf("Saving vTrace %d\n",i)
+	starttimevolt=startsw()	
+	for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[Best][j]
+	sprint( xstr , "outputVtrace(" )
+	for ( k = 0 ; k < NP ; k += 1 ) {
+		if ( k == 0 ) {
+			sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+		} else {
+			sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+		}
+	}
+	sprint( xstr , "%s)" , xstr )
+	printf(xstr)
+	execute(xstr)
+	printf("Save took %f\n",startsw()-starttimevolt)
+
+	// Then open up parameter combination file and set paramcombs Vector
+	// to contain the parameter sets selected for saving vtraces of
+	sprint( xstr, "%soutput/paramcombs.dat", PARENTDIR )
+	pc_file.ropen( xstr )
+	paramcombs = new Vector()
+	//paramcombs.append(1,29,58,86,114,143,171,199,228,256)
+	paramcombs.scanf(pc_file)
+	pc_file.close()
+	
+	for ( i = 0 ; i < ( paramcombs.size ) ; i += 1 ) {
+		ind = paramcombs.x[i]
+		printf("Saving vTrace %d\n",i)
+		starttimevolt=startsw()
+		for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[ind-1][j]
+		sprint( xstr , "outputVtrace(" )
+		for ( k = 0 ; k < NP ; k += 1 ) {
+			if ( k == 0 ) {
+				sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+			} else {
+				sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+			}
+		}
+		sprint( xstr , "%s)" , xstr )
+		execute(xstr)
+		printf("Save took %f\n",startsw()-starttimevolt)
+	}
+	vt_file.close()
+}
+
+proc save_iv() { local i , j , k , l , stimlvl , numtowrite , ind	localobj targetV , modelV , paramcombs
+
+	// load up the target voltage vector
+	sprint( xstr , "data/%s/iv.dat" , cellname )
+	iv_file.ropen( xstr )
+	targetV = new Vector()
+	targetV.scanf( iv_file )
+	
+	// open up the output dat file
+	ivout_file.wopen( "output/iv.dat" )
+	
+	// Use the best parameter set for testing IV relationship
+	find_best()
+	printf( "Saving IV curve data \n" )
+
+	// save the best one (index 0... hopefully...) and then save every one in 
+	// paramcombs.dat, then write the number of spikes to the ilfe...
+	
+	// Open parameter combination file and set paramcombs vector to contain
+	// the parameter sets selected for saving data
+	sprint( xstr, "%soutput/paramcombs.dat", PARENTDIR )
+	pc_file.ropen( xstr )
+	paramcombs = new Vector()
+	paramcombs.scanf(pc_file)
+	pc_file.close()
+	
+	// modelV matrix will be width of paramcombs.size + 1 and length 9...
+	modelV = new Matrix( 9 , ( paramcombs.size + 1 ) )
+	
+	for ( i = -1 ; i < ( paramcombs.size ) ; i += 1 ) {
+		if( i==-1 ) {
+			ind = 1
+		} else {
+			ind = paramcombs.x[i]
+		}
+		// we save the best fit first, and assumption here is a sorted 
+		// curr_population file with best fit as the first entry
+		printf("Saving IV %d\n",ind)
+		for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[ind][j]
+		sprint( xstr , "set_n_params(" )
+		for ( k = 0 ; k < NP ; k += 1 ) {
+			if ( k == 0 ) {
+				sprint( xstr, "%stransvec.x[%d]", xstr, k )
+			} else {
+				sprint( xstr, "%s,transvec.x[%d]", xstr, k )
+			}
+		}
+		sprint( xstr, "%s)", xstr )
+		execute( xstr  )
+		//adjust conductances
+		set_conds()
+		//adjust kinetics
+		set_kins()
+		
+		// 9 levels of current injection tested:
+		// -160, -120, -80, -40, 0, 40, 80, 120, 160
+		for( l = 0 ; l < 9 ; l += 1 ) {
+			stimlvl = ( ( l * 0.04 ) - 0.16 )
+			sprint( xstr , "%s=%g" , stimname , stimlvl )
+			execute( xstr  )
+			
+			// init and run, take the voltage at 150ms...
+			init()
+			tstop=150
+			run()
+			
+			// take the voltage
+			modelV.x[l][i+1] = v( 0.5 )
+		}
+	}
+
+	// write to file: stimlvl , target , each model
+	// write all 9 if using cell Dec15, but only 6 if using Jun24
+	if ( CELL == 2 ) {
+		numtowrite = 9
+	} else if ( CELL == 3 ) {
+		numtowrite = 6
+	} else {
+		numtowrite = 6
+	}
+	
+	for( l = 0 ; l < numtowrite ; l += 1 ) {
+		stimlvl = ( ( l * 0.04 ) - 0.16 ) * 1000
+		sprint( xstr , "%g\t%g\t" , stimlvl , targetV.x[ l ] )
+		ivout_file.printf( xstr )
+		for( i = 0 ; i < (paramcombs.size+1) ; i += 1 ) {
+			sprint( xstr , "%g\t" , modelV.x[l][i] )
+			ivout_file.printf( xstr )
+		}
+		sprint( xstr , "\n" )
+		ivout_file.printf( xstr )
+	}
+	
+	ivout_file.close()
+}
+
+proc save_fi() { local i , j , k , l , stimlvl  ,ind	localobj targetFR , voltVecSpikes , spikeHist , modelFR , paramcombs
+	// load vectors
+	voltVecSpikes = new Vector()
+	spikeHist = new Vector()
+	
+	// load up the target voltage vector
+	sprint( xstr , "data/%s/fi.dat" , cellname )
+	fi_file.ropen( xstr )
+	targetFR = new Vector()
+	targetFR.scanf( fi_file )
+	
+	// open up the output dat file
+	fiout_file.wopen( "output/fi.dat" )
+	
+	printf( "Saving FI curve data \n" )
+	
+	// save the best one (index 0... hopefully...) and then save every one in 
+	// paramcombs.dat, then write the number of spikes to the ilfe...
+	
+	// Open parameter combination file and set paramcombs vector to contain
+	// the parameter sets selected for saving data
+	sprint( xstr, "%soutput/paramcombs.dat", PARENTDIR )
+	pc_file.ropen( xstr )
+	paramcombs = new Vector()
+	paramcombs.scanf(pc_file)
+	pc_file.close()
+	
+	// modelFR matrix will be width of paramcombs.size + 1 and length 8...
+	modelFR = new Matrix( 8 , ( paramcombs.size + 1 ) )
+	
+	for ( i = -1 ; i < ( paramcombs.size ) ; i += 1 ) {
+		if( i==-1 ) {
+			ind = 0
+		} else {
+			ind = paramcombs.x[i]
+		}
+		// we save the best fit first, and assumption here is a sorted 
+		// curr_population file with best fit as the first entry
+		printf("Saving FI %d\n",ind)
+		for( j = 0 ; j <= ( NP - 1 ) ; j += 1 ) transvec.x[j] = pop.x[ind-1][j]
+		sprint( xstr , "set_n_params(" )
+		for ( k = 0 ; k < NP ; k += 1 ) {
+			if ( k == 0 ) {
+				sprint( xstr, "%stransvec.x[%d]", xstr, k )
+			} else {
+				sprint( xstr, "%s,transvec.x[%d]", xstr, k )
+			}
+		}
+		sprint( xstr, "%s)", xstr )
+		printf( "i = %d ; ind = %d ; %f\n" , i , ind , transvec.x[1] )
+		execute( xstr  )
+		//adjust conductances
+		set_conds()
+		//adjust kinetics
+		set_kins()
+		
+		// 8 levels of current injection tested:
+		// 30, 80, 130, 180, 230, 280, 330, 380
+		for( l = 0 ; l < 8 ; l += 1 ) {
+			stimlvl = ( ( l * 0.05 ) + 0.03 )
+			sprint( xstr , "%s=%g" , stimname , stimlvl )
+			execute( xstr  )
+			
+			// init and run, take the voltage at 200ms...
+			init()
+			run()
+			
+			// count the spikes
+			voltVecSpikes.spikebin( voltVec , -20 )
+			spikeHist = voltVecSpikes.histogram( 0 , 1 , 1 )
+			modelFR.x[l][i+1] = spikeHist.x[ 2 ]
+		}
+	}
+
+	// write to file: stimlvl , target , each model
+	for( l = 0 ; l < 8 ; l += 1 ) {
+		stimlvl = ( ( l * 0.05 ) + 0.03 )
+		sprint( xstr , "%g\t%g\t" , stimlvl , targetFR.x[ l ] )
+		fiout_file.printf( xstr )
+		for( i = 0 ; i < (paramcombs.size+1) ; i += 1 ) {
+			sprint( xstr , "%g\t" , modelFR.x[l][i] )
+			fiout_file.printf( xstr )
+		}
+		sprint( xstr , "\n" )
+		fiout_file.printf( xstr )
+	}
+	
+	fiout_file.close()
+}
+
+/* process sensitivity_analysis()
+ * Generates fitness values for all fitness functions in all currently loaded 
+ * generators for a range of parameters centred around the curr_population.
+ * This means the process takes the current best fitting parameter values for 
+ * the model, tests them with +- a % to each parameter in turn, and saves the 
+ * associated parameter values and fitness value from every function in an 
+ * output file.
+ * 
+ * Runs in parallel using the same code the Evaluate_Pop() uses to distribute 
+ * jobs.
+ * 
+ * Currently unsure how exactly to generate the populations. Can use:
+ * 		N_processes == number of permutations of parameter values, then get 
+ * 		all of the permutations for one parameter in the population at a time, 
+ * 	OR
+ * 		N_processes == population size, and do one permutation of each 
+ * 		parameter at a time, generating that permutation for every member of 
+ * 		the population.
+ * 
+ */
+
+proc sensitivity_analysis(){local i,j,k,numPerms,fitnessVal,ind	localobj permMat
+	/* Procesing order:
+	 * 1) Generate populations to be submitted to workers one at a time, 
+	 * 	  sending them off to run, waiting for the results, gathering results 
+	 * 	  as they come back, and writing to the output file.
+	 */
+	 
+	 printf( "Sensitivity Analysis commencing in 3...2...1... GO!\n" )
+	 
+	//	1) going to use first methoed where n_processes = number of permutations
+	// initialise vector holding permutations, and work out number of 
+	// permutations based on number of parameters (NP)
+	
+	numPerms = ( ( NP * 4 ) + 1 )
+	permMat = new Matrix( numPerms , NP )
+	
+	// set up permutations for members of population one at a time
+	// Can set pop_size here to not run through lots of very similar parameters
+	pop_size = 1
+	
+	for ( i = 0 ; i <= pop_size-1 ; i += 1 ) {
+		printf( "Population member: %d\n" , i )
+		printf( "Generating permutations...\n" )
+		// fill the permMat with identical vectors, the current pop member:
+		for ( j = 0 ; j <= numPerms-1 ; j += 1 ) {
+			for ( k = 0 ; k <= NP-1 ; k += 1 ) {
+				permMat.x[ j ][ k ] = pop.x[ i ][ k ]
+			}
+		}
+		// now modulate one parameter by -10, -5, +5 and +10 % in 4 adjacent 
+		// rows, for each paramter, starting at row index 1 (base is 0)...
+		row = 1
+		for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+			permMat.x[ row ][ j ] = ( pop.x[ i ][ j ] * 0.9 )
+			row += 1
+			permMat.x[ row ][ j ] = ( pop.x[ i ][ j ] * 0.95 )
+			row += 1
+			permMat.x[ row ][ j ] = ( pop.x[ i ][ j ] * 1.05 )
+			row += 1
+			permMat.x[ row ][ j ] = ( pop.x[ i ][ j ] * 1.1 )
+			row += 1
+		}
+		permMat.printf()
+		// now run simulations to get fitness values for each permutation, and 
+		// save output to the sa_file()
+		if ( pc.nhost == 1 ) {    // use the serial form
+			// can't just use tfunk(), as this is always set to save to fv_file, 
+			// so the guts of it are copied here:
+			//for each permutation...
+			for ( j = 0 ; j <= numPerms-1 ; j += 1 ) {
+				printf( "...Simulating permutation %d...\n" , j )
+				//...retrieve parameters from permMat...
+				for ( k = 0 ; k <= NP-1 ; k += 1 ) {
+					transvec.x[ k ] = permMat.x[ j ][ k ]
+				}
+				transvec.printf()
+				//...set parameters...
+				sprint( xstr , "set_n_params(" )
+				for ( k = 0 ; k < NP ; k += 1 ) {
+					if ( k == 0 ) {
+						sprint( xstr , "%stransvec.x[%d]" , xstr , k )
+					} else {
+						sprint( xstr , "%s,transvec.x[%d]" , xstr , k )
+					}
+				}
+				sprint( xstr , "%s)" , xstr )
+				execute(xstr)
+				//...adjust conductances...
+				set_conds()
+				//...adjust kinetics...
+				set_kins()
+				//...run simulation...
+				MRF.p.run()
+				//...retrieve total error...
+				fitnessVal=MRF.p.pf.errval
+				//...retrieve individual error values...
+				errVec = get_error_values()
+				//...write this stuff to the output file...
+				sa_file.printf("%d %d ",1,1)
+				for ( k = 0 ; k <= NP-1 ; k += 1 ) {
+					sa_file.printf( "%1.16f " , transvec.x[ k ] )
+				}
+				for ( k = 0 ; k <= errVec.size()-1 ; k += 1 ) {
+					sa_file.printf( "%g " , errVec.x[ k ] )
+				}
+				sa_file.printf("%10.2f\n",fitnessVal)
+				sa_file.flush()
+				//.. finally loop to next permutation
+			}
+		} else {	// use the bulletin board form
+			// for each permutation...
+			for ( j = 0 ; j <= numPerms-1 ; j += 1 ) {
+				//...retrieve parameters from permMat...
+				for ( k = 0 ; k <= NP-1 ; k += 1 ) {
+					transvec.x[ k ] = permMat.x[ j ][ k ]
+				}
+				if ( DEBUG ) printf( "j=%d\n" , j )
+				//...submit a job for this permutation to the worker nodes...
+				pc.submit( "tfunkpar" , j , transvec )
+				//...loop back and set up a job for the next permutation...
+			}
+			// While	 results aren't in from every job yet...
+			while ((id = pc.working()) != 0) {
+				//...when something gets returned, retrieve the output values...
+				pc.look_take(id)
+				if (DEBUG) printf("made it into while\n")
+				ind = pc.upkscalar()
+				if (DEBUG) printf("ind=%d\n",ind)
+				fitVal = pc.upkscalar()
+				if (DEBUG) printf("made it past upkscalars\n")
+				errVec = pc.upkvec()
+				if ( DEBUG ) printf( "collected %d error values\n" , errVec.size() )
+				//...write the results to the output file...
+				//fv_file.printf("%d %d %1.16f %1.16f %1.16f %10.2f\n",id,ind,pop.x[ind][0],pop.x[ind][1],pop.x[ind][2],fitVal)
+				sa_file.printf("%d %d ",id,ind)
+				for ( j = 0 ; j <= NP-1 ; j += 1 ) {
+					sa_file.printf( "%1.16f " , pop.x[ ind ][ j ] )
+				}
+				for ( j = 0 ; j <= errVec.size()-1 ; j += 1 ) {
+					sa_file.printf( "%g " , errVec.x[ j ] )
+				}
+				sa_file.printf("%10.2f\n",fitVal)
+				sa_file.flush()
+			}
+		}
+	}
+	sa_file.close()
+	if ( DEBUG ) printf( "made it out of sensitivity analysis...\n" )
+	printf( "Sensitivity analysed!\n" )
+}
+
+proc random_testing(){local i , j , k , fitVal	localobj paramVec
+	
+	// make file of randomTesting parameters for producing output figures
+	param_file.wopen( "output/metaparams.dat" )
+	param_file.printf( "%s: %d\n" , "population" , rand_max_pop ) 
+	param_file.printf( "%s: %d\n" , "parameters" , NP )
+	param_file.printf( "%s: %d\n" , "generators" , NGens )
+	param_file.printf( "%s: %d\n" , "totalFFs" , totalFFs )
+	param_file.printf( "%s: %d\n" , "totalT" , (Tend.max()/voltvecdt) )
+	param_file.printf( "%s: %d\n" , "MRF" , MRFflag )
+	param_file.printf( "%s: %g\n" , "dt" , voltvecdt)
+	param_file.printf( "%s: %d\n" , "generations" , 1 )
+	param_file.close()
+
+	begintime=startsw()
+	
+	// submit a load of jobs for the parallel workers to attack...
+	for ( i = 0 ; i < rand_max_pop ; i += 1 ) {
+		for ( j = 0 ; j < NP ; j += 1 ) {
+			transvec.x[ j ] = r[ j ].repick()
+		}
+		pc.submit( "tfunkpar" , i , transvec )
+	}
+	//... wait for results back from the workers, and print them to a file
+	while ((id = pc.working()) != 0) {
+		pc.look_take(id)
+		ind = pc.upkscalar()
+		fitVal = pc.upkscalar()
+		errVec = pc.upkvec()
+		paramVec = pc.upkvec()
+		fv_file.printf("%d %d ",id,ind)
+		for ( i = 0 ; i < paramVec.size() ; i += 1 ) {
+			fv_file.printf( "%1.16f " , paramVec.x[ i ] )
+		}
+		for ( i = 0 ; i < errVec.size() ; i += 1 ) {
+			fv_file.printf( "%g " , errVec.x[ i ] )
+		}
+		fv_file.printf("%10.2f\n",fitVal)
+		fv_file.flush()
+	}
+	Elapsed = startsw() - begintime
+ 	print "-------------------------------end of Random Testing----------------------------------"
+	printf( "\nTime Taken = %d\n" , Elapsed )
+	g_file.close()
+	fv_file.close()
+}

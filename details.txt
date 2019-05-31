@@ -1,0 +1,71 @@
+Column	ParamNumber	Parameter
+1		1			dgnaf
+2		2			dgnap
+3		3			dgkdr
+4		4			dgka
+5		5			dgk2
+6		6			dgar
+7		7			dgkm
+8		8			dg_pas
+9		9			de_pas
+10		10			dgkc
+11		11			dgkahp
+12		12			dphi_cad
+13		13			dbeta_cad
+14		14			dgcal
+15		15			dtmmnaf
+16		16			dtmhnaf
+17		17			dtmkdr
+18		18			dtmkm
+19		19			dvsnaf
+20		20			dvskdr
+21		21			dvskm
+
+Column	FFNumber	Fitness function component
+22		1			200ms -160pA:			RF 0-15
+23		2							RF 15-30
+24		3							RF 150-200
+25		4			2s -70pA:			RF 0-15
+26		5							RF 150-200
+27		6							Rate 15-2015ms, Rate only
+28		7			2s +230pA:			RF 0-15
+29		8							PP -2,-1
+30		9							PP -1,0
+31		10							PP 0,1
+32		11							PP 1,2
+33		12							PP 2,5
+34		13							PP 5,10
+35		14							PP 10,20
+36		15							PP 20,50
+37		16							APShape 15-2015ms, -5:10
+38		17							APShape 15-2015ms, 10:50
+39		18							Rate 15-200ms, FR only
+40		19							Rate 15-200ms, CV only
+41		20							Rate 200-2015ms, FR only
+42		21							Rate 200-2015ms, CV only
+43		22							FRfit linear, tot_fr only
+44		23							FRfit linear, slope only
+45		24							FRfit exp, tot_fr only
+46		25							FRfit exp, slope only
+47		26			2s +330pA:			RF 0-15
+48		27							PP -2,-1
+49		28							PP -1,0
+50		29							PP 0,1
+51		30							PP 1,2
+52		31							PP 2,5
+53		32							PP 5,10
+54		33							PP 10,20
+55		34							PP 20,50
+56		35							APShape 15-2015ms, -5:10
+57		36							APShape 15-2015ms, 10:50
+58		37							Rate 15-200ms, FR only
+59		38							Rate 15-200ms, CV only
+60		39							Rate 200-2015ms, FR only
+61		40							Rate 200-2015ms, CV only
+62		41							FRfit linear, tot_fr only
+63		42							FRfit linear, slope only
+64		43							FRfit exp, tot_fr only
+65		44							FRfit exp, slope only
+
+66	Total fitness
+

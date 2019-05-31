@@ -1,0 +1,3277 @@
+/* 
+A primitive error function class for multiple run fitter must have a
+	func efun(y_vec, x_vec)
+which is the simulation result of the run. Also, it should register
+itself with a call to parmfitness_efun_append("classname").
+Finally it should supply rfile and wfile procedures for saving its
+state.
+*/
+
+/*******************************************************************
+
+AP_instFRFitness:  modified from APFitness (M Hines)
+
+Developed by Christina Weaver, Mount Sinai School of Medicine
+christina.weaver@mssm.edu, Aug 2005
+
+fitness features useful for an action potential
+
+ we imagine that there is one point on the AP which is used to
+ locate the AP on the x-axis (eg the peak or some point on the rise)
+ and then there are a two sets of points
+ with relative-x values. In the first set the error is the relative
+x-difference between fixed y values and in the second set the error
+is the absolute y-difference between fixed relative x values.
+ y-values with absolute and a set of relative x-values
+ points
+
+if the APCount objref apc and associated vector spiketimes has been 
+used to record the model's AP times, and if the experimental AP times 
+are available, the specified window is applied to all AP times, 
+comparing each model AP to the first experimental AP.  The sum of these
+errors comprise the error returned from efun().
+
+if apc and/or spiketimes are not defined, the error is calculated for the 
+first model AP only.
+
+Global data:
+
+xdat, ydat:  'Experimental' data against which model output is compared
+xdat_rel     time, relative to first experimental peak, of chosen error points
+ydat_rel     y-data corresponding to xdat_rel
+idx_rel	     indices in xdat, ydat of data listed in xdat_rel, ydat_rel
+xyAPtimes    indices indicating APs in experimental data,
+	     e.g. xdat[xyAPtimes.x[i]] is time of AP i, with voltage
+	     ydat[xyAPtimes.x[i]]
+modelAPtimes indices indicating APs in model output
+datFR, datCV FR, CV for experimental data
+modFR, modCV FR. CV for model data
+
+vec.nextpeak(ind) returns the index of the next peak of vector 'vec' after index
+'ind'
+
+mod_APleft, mod_APright, exp_APleft, exp_APright, n_modAP, n_expAP
+
+
+Also included in the objective function is a term that fits a curve to the 
+target and model instantaneous firing rates, and then calculates a firing rate 
+error as the model deviation from the target fit.  This is precisely the same 
+as the FR_Fitness function found in e_frtime.hoc.  It is included here with the 
+AP Shape error calculation so that the MulRunFitter doesn't try to execute the 
+model twice to evaluate the two separate errors. 
+
+*******************************************************************/
+
+/* error is independent of position of Action potential peak */
+
+install_vector_fitness()
+
+parmfitness_efun_append("AP_instFR_Fitness")
+
+begintemplate AP_instFR_Fitness
+
+// PUBLIC declarations 
+//
+public efun, g, set_data, set_modelx, xdat, ydat, idx_, peak, have_data
+public unmap, map, vbox, rfile, wfile, use_x, peakscale, xscale, yscale, ntag, tag
+public clone, build, before_run, mintstop
+public save_context, restore_context
+public find_APtimes, xyAPtimes, modelAPtimes, findFR, get_outname
+public set_r
+public efun_1AP, efun_withFRCV, efun_old, efun_yfit, efun_isiW
+public efun_bowerW
+public datFR, modFR					// set of all instantaneous FR's
+public datFRmean, datCVmean, modFRmean, modCVmean	// mean values
+public datFRsd, datCVsd, modFRsd, modCVsd		// SD values
+public boundary, apwin, outname
+public t_hat, pow1, pow2, frscale, cvscale, ey, ey2
+public frm_fac, frs_fac, cvm_fac, cvs_fac, frcv_int
+public xdat_rel_list, ydat_rel_list, idx_rel_list
+public time_scale, miss_scale, shape_scale, brst_thold, brst_pnlty
+public set_apwin_noGUI, efun_mismatch_avgAP, efun_bower
+public EFUN_DBG, VERBOSE, GBAR_SMRY, TIME_DBG
+public PASTE_DBG
+public MS_AHP
+public useAP, match_all	 // which APs should be used for shape error calculation?
+
+// public variables for time-modulated FR error
+public tot_frscale, nf_frscale, slope_scale
+public exp_intcpt, exp_slope, expsa, expsb, expchi
+public mod_intcpt, mod_slope, modsa, modsb, modchi
+public datFit, modFit, efr, FCNTYP
+public ftime 
+public e_dly, delay_pnlty, ebrst, e_slope
+
+//public variables for AHP measurement
+public neg_p, trgh_sz, trgh_ps, thr_ac
+
+// general variables
+//
+objref xdat, ydat	// authoritative data
+objref g, vbox, tobj, this
+strdef tstr, mserrlabel, modelabel, scalelabel, ntag, tmpstr, tag
+objref boundary
+
+// variables related to shape calculations
+objref xdat_rel_list, ydat_rel_list, idx_rel_list // subset of data points to fit
+objref xyAPtimes, modelAPtimes        // AP times of (xdat, ydat) and of the model result
+objref apwin
+objref useAP, left_ptr, right_ptr, n_ptr
+objref Png, Pts, Pps, Pac, nw_ptr
+
+// variables for FR & CV calculations
+objref datFR, modFR
+objref frtmp, frptr, cvptr, frptrsd, cvptrsd  // mean, stdev of FR & CV
+objref frindx, frtmpsd, cvtmp
+
+//variables for time-modulated FR calculations
+objref ptra, ptrb, ptrsiga, ptrsigb, ptrchi
+objref datFit, modFit
+
+// variables to measure AHP
+objref dV, iAHP, iAHPn, iAHPa, AHPchg
+objref APth, APst, APnd, npts
+objref trough_sz,trough_posn
+objref AHPout
+strdef AHPname
+
+// output variables
+strdef outname, outMname, tab, tmpname
+objref xtmp, ytmp, tmp_idx
+objref dbgfile, dbgfile2, ftime
+
+datFRmean = datCVmean = modFRmean = modCVmean = 0
+datFRsd   = datCVsd   = modFRsd   = modCVsd   = 0
+exp_APleft = exp_APright = mod_APleft = mod_APright = 0
+n_expAP = n_modAP = 0
+n_expWin = n_modWin = 0
+
+EFUN_DBG = 0
+PASTE_DBG = 0
+SAVE_DBG = 0
+tab = "     "
+if( SAVE_DBG ) { print "Printing save debug messages" }
+if( PASTE_DBG ) {
+    dbgfile = new File()
+    dbgfile.wopen("paste_curve.m")
+    dbgfile.printf("%% trying to understand paste mechanism\n")
+    dbgfile.close()
+}
+if( EFUN_DBG ) { print "Printing efun debug messages" }
+
+external clipboard_set, clipboard_get
+
+i=0
+
+proc before_run() {}
+
+/*******************************************************
+
+func efun()	Aug 04
+
+Let Nt = number of APs in experiment
+    Nm = number of APs in model
+    YFit_i = result from efun_yfit(model spike i)
+
+Then, the error function calculated here is the E(M) described in our paper (in
+preparation).  Namely, there are three components to this function:
+
+1.  for each spike which occurs in both exp & model (i.e. number is
+    min(Nt,Nm)), calculate the absolute difference in spike timing, and divide
+    by scale factor Ai.  Tally the sum of these errors.
+
+2.  for each missing/extra spike, add P/Nt, where P=tstop
+
+3.  for each model spike, add Yfit_i, making sure that it is scaled
+    appropriately as a fraction of the window size (e.g. multiply scale factor
+    from 0 to 1) 
+
+Notes on YFit_i:  we already truncate the window appropriately if it occurs at
+the beginning or end of the simulation.  But also, we do not want to include
+the previous or next AP in the window.  In such cases, set the cutoff to be the
+recorded "spiketime", namely the time at which the voltage crosses -20 mV.
+This will avoid any error due to the interfering AP.
+
+If there are no model "APs", YFit_i is determined as the 
+YFit from the first model peak, even though it is not 
+actually an AP (then Nm in denominator is 1, but Nm in 
+numerator is 0).
+
+See efun_yfit below for a description of its evaluation.
+
+This describes the shape error.  The error function also has the follwoing terms:
+
+*    Bursting penalty for ISIs smaller than a specified threshold
+*    Mean and standard deviation of instantaneous firing rate
+*    Mean and standard deviation of coefficient of variation
+*    Firing delay penalty
+
+*******************************************************/
+
+func efun() {  local e, etm, i, A, mnind, mxind, exind
+
+//printf("EFUN (%g,%g,%g,%g,%g,%g,%g,%g)\n",gnabar_fn,gkbar_fn,gbar_kca,Kp_cad,Rca_cad,gbar_ka,gbar_cahi,gbar_nap)
+
+/**
+EFUN_DBG=1
+GBAR_SMRY=1
+VERBOSE=1
+sprint(outname,"data_Na%.18f",gnabar_fn)
+**/
+        // INPUT:
+	// $o1	y-values of model output (e.g soma.v(.5) )
+	// $o2	t-values of model output (time, ms)
+	
+	sttime = startsw()
+
+        if( EFUN_DBG ) {
+            print "\nPrinting error function data to M-file ",outname
+	    print "Scale factor = ", shape_scale
+	    sprint(outMname,"%s.m",outname)
+	    dbgfile = new File()
+	    dbgfile.wopen(outMname)
+
+	    dbgfile.printf("%% finding FR for experiment, then model\n")
+	}
+
+	// NOTE  AP times gives an index into the respective time vector,
+	// representing the time when the AP passes threshold, NOT the
+	// peak.  Use nextpeak.
+	if( xyAPtimes.size == 0 ) { 
+	    left_ptr = new Pointer(&exp_APleft)
+	    right_ptr = new Pointer(&exp_APright)
+	    n_ptr = new Pointer(&n_expAP)
+            nw_ptr = new Pointer(&n_expWin)
+	    find_APtimes(xdat,ydat,xyAPtimes,"Exp AP",1,left_ptr,right_ptr,n_ptr,nw_ptr) 
+        } else {
+	    if( xdat.x[xyAPtimes.x[exp_APleft]] < boundary.x[0] || xdat.x[xyAPtimes.x[exp_APright]] > boundary.x[1]) { 
+                printf("Time boundary changed; repeat target AP search.\n")
+	    left_ptr = new Pointer(&exp_APleft)
+	    right_ptr = new Pointer(&exp_APright)
+	    n_ptr = new Pointer(&n_expAP)
+            nw_ptr = new Pointer(&n_expWin)
+	    find_APtimes(xdat,ydat,xyAPtimes,"Exp AP",1,left_ptr,right_ptr,n_ptr,nw_ptr) 
+            }
+        }
+
+//printf("Boundary is %g - %g and expAPtimes go from %g to %g (indexed %d to %d)\n",boundary.x[0],boundary.x[1],xdat.x[xyAPtimes.x[exp_APleft]],xdat.x[xyAPtimes.x[exp_APright]],exp_APleft,exp_APright)
+	n_AP = 0
+	for i = 0, xyAPtimes.size-1  {
+	    if( xdat.x[xyAPtimes.x[i]] < boundary.x[0] ) continue 
+	    if( xdat.x[xyAPtimes.x[i]] > boundary.x[1] ) { break }
+	    if( xdat.x[xyAPtimes.x[i]] > $o2.x[$o2.size-1] ) { break }
+	    n_AP += 1
+	}
+//print "Found n_AP = ",n_AP
+	
+	frptr = new Pointer(&datFRmean)
+	cvptr = new Pointer(&datCVmean)
+	frptrsd = new Pointer(&datFRsd)
+	cvptrsd = new Pointer(&datCVsd)
+	findFR(xdat.ind(xyAPtimes),datFR,frptr,frptrsd,cvptr,cvptrsd)
+
+	left_ptr = new Pointer(&mod_APleft)
+	right_ptr = new Pointer(&mod_APright)
+        n_ptr = new Pointer(&n_modAP)
+        nw_ptr = new Pointer(&n_modWin)
+	find_APtimes($o2,$o1,modelAPtimes,"Model AP",1,left_ptr,right_ptr,n_ptr,nw_ptr)	
+
+//printf("Looked again for model APs from %g - %g; ",boundary.x[0],boundary.x[1])
+//printf("%g spikes, %g windows\n",n_modAP,n_modWin)
+//if( n_modAP > 0 ) printf("Found %g to %g (numbered %d to %d); ", $o2.x[modelAPtimes.x[mod_APleft]],$o2.x[modelAPtimes.x[mod_APright]],mod_APleft,mod_APright)
+
+	frptr = new Pointer(&modFRmean)
+	cvptr = new Pointer(&modCVmean)
+	frptrsd = new Pointer(&modFRsd)
+	cvptrsd = new Pointer(&modCVsd)
+	findFR($o2.ind(modelAPtimes),modFR,frptr,frptrsd,cvptr,cvptrsd)
+
+	e = 0
+	nstr = 1
+	nstr2 = 1
+	nlbl = 1
+
+        if( EFUN_DBG ) {  print_Mfile_header($o1,$o2,e)   }
+
+	// Evaluate each component of the error function.
+	//
+	//
+	n_both = n_AP
+
+	if( n_modAP > n_AP ) { 
+	    n_both = n_AP 
+	    n_big  = n_modAP
+	} else { 
+	    n_both = n_modAP
+	    n_big  = n_AP
+	}
+	if( n_modWin > n_expWin ) { 
+	    n_bigWin  = n_modWin
+            n_bothWin = n_expWin
+	} else { 
+	    n_bothWin = n_modWin
+	    n_bigWin  = n_expWin
+	}
+	if( EFUN_DBG ) { dbgfile.printf("n_both = %d; n_big=%d;\n",n_both,n_big) }
+
+	// Penalize ISI's which are less than a user-specified threshold brst_thold, 
+	// by a user specified amount brst_pnlty
+	//
+	// This will penalize doublets and bursting.
+
+        ebrst = 0
+	if( brst_pnlty > 0 ) { 
+	    ebrst = efun_penburst($o2) 
+	    e += ebrst
+	} else {
+	   if( EFUN_DBG ) {
+	        //dbgfile.printf("str(%d) = {'ISI burst penalty (0 times)    0'};\n", nstr)
+		//nstr += 1
+	        dbgfile.printf("lbl(%d) = {'ISI burst penalty (0 times)    0'};\n", nlbl)
+		nlbl += 1
+		printf("ISI burst penalty (0 times)    0\n")
+	    }
+	}
+
+	// Penalize the difference between the target and model delay to first spike.
+	// Scale factor on this term is delay_pnlty; for description of this term see
+	// the func description below
+
+	if( delay_pnlty > 0 ) { 
+	    e_dly = efun_pendelay($o1,$o2) 
+	    e += e_dly
+	} else {
+	   if( EFUN_DBG ) {
+	        //dbgfile.printf("str(%d) = {'Spike delay penalty (0 times)    0'};\n", nstr)
+		//nstr += 1
+	        dbgfile.printf("lbl(%d) = {'Spike delay penalty (0 times)    0'};\n", nlbl)
+		nlbl += 1
+		printf("Spike delay penalty (0 times)    0\n")
+	    }
+	}
+
+
+	//
+	// 1.  for each model spike, add Yfit_i, making sure that it is scaled
+	//     appropriately as a fraction of the window size (e.g. multiply scale factor
+	//     from 0 to 1) 
+	//
+	// If there are no model APs, just calculate the error from
+	// the peak model voltage.  Otherwise, calculate the average yfitness
+	// error. 
+
+	ey = 0
+
+	mnind = $o2.indwhere(">=",boundary.x[0])
+	if( mnind < 0 ) {
+//printf("First boundary never reached; therefore NO SHAPE ERROR.\n")
+	    return
+	}
+	mxind = $o2.indwhere(">=",boundary.x[1])
+        if( mxind < 0 ) {
+	    mxind = $o2.size-1
+//printf("Boundary not reached; set end to %g\n",$o2.x[mxind])
+}
+//printf("mnind %g, mxind %g\n",mnind,mxind)
+	// if match_all == 1, Match each model AP sequentially to the
+	//    corresponding experimental AP.
+	// else, match each model AP to the each of the experimental APs
+	// selected. 
+	//
+
+	calc_shape_error($o1,$o2,match_all)
+
+
+	if( EFUN_DBG ) { 
+	    //dbgfile.printf("str(%d) = {'Shape Error (mV-ms)   %g'};\n",nstr,ey )
+	    //nstr += 1
+	    dbgfile.printf("lbl(%d) = {'Shape Error (mV-ms)   %g'};\n",nlbl,ey )
+	    nlbl += 1
+	    if( shape_scale > 0 ) {
+	        print "Shape Error (mV-ms)\t",ey/shape_scale," --> ",ey
+	    } else { print "Shape Error (mV-ms)\t0 --> 0" } 
+
+	}
+	e += ey
+
+
+	//
+	// For both the model & experimental data, fit a straight line to the
+	// instantaneous FR.  Use the intercept & slope to calculate an
+	// appropriate error.  Note:  there must be at least three target APs 
+	// (i.e. two FR points) to fit the line.
+	//
+	
+        if( FCNTYP == 0 ) { 
+	    efr = efun_linfit($o1,$o2) 
+
+            //
+	    // error in FR fit slope is equal to the RMS of the difference between
+	    // the two fit slopes.  Note, since the sqrt of a squared quantity is
+	    // just the absolute value of the quantity, it is implemented as such
+	    // below.
+            e_slope = abs(exp_slope-mod_slope)
+	    //print "found e_slope = ",e_slope, " * ",slope_scale
+	}
+	if( FCNTYP == 1 ) { 
+	    efr = efun_expfit($o1,$o2) 
+	    e_slope = 0
+	}
+	if( FCNTYP == 2 ) { 
+	    efr = efun_sinefit($o1,$o2) 
+	    e_slope = 0
+	}
+
+	efr     *= tot_frscale
+	e_slope *= slope_scale
+
+	e += efr
+	e += e_slope
+
+	if( EFUN_DBG ) { 
+	    //dbgfile.printf("str(%d) = {'Slope Error (Hz/ms)   %g (scale %g)'};\n",nstr,e_slope,slope_scale )
+	    //nstr += 1
+	    dbgfile.printf("lbl(%d) = {'Slope Error (Hz/ms)   %g (scale %g)'};\n",nlbl,e_slope,slope_scale )
+	    nlbl += 1
+            //print "\tTarget Slope ",exp_slope," - Model Slope ",mod_slope
+	    print "Slope Error (Hz/ms)\t",e_slope/slope_scale," * ",slope_scale," --> ",e_slope
+	}
+
+
+        if( MS_AHP ) {
+	    Png = new Pointer(&neg_p)
+	    Pts = new Pointer(&trgh_sz)
+	    Pps = new Pointer(&trgh_ps)
+	    Pac = new Pointer(&thr_ac)
+            measure_AHP($o2.c(mnind,mxind),$o1.c(mnind,mxind),Png,Pts,Pps,Pac,outname,10)
+
+        }
+
+
+        if( EFUN_DBG ) {  
+ 	    print_Mfile_tail($o1,$o2,e)  	
+	}
+	
+
+	if (use_gui) {
+		sprint(mserrlabel, "%g", e)
+		redraw($o2, $o1)
+	}
+
+	if( EFUN_DBG ) {
+	    dbgfile.printf("%% now e=%g\n",e)
+	    dbgfile.close()
+        }
+	if( TIME_DBG ) {
+	    ftime.printf("%g ",startsw()-sttime)
+	}
+
+//if( VERBOSE) { 
+//printf("EFUN (%g,%g,%g,%g,%g,%g,%g,%g) [%g %g %g %g %g] %g %g %g %g:  Returning e = %g\n",gnabar_fn,gkbar_fn,gbar_kca,Kp_cad,Rca_cad,gbar_ka,gbar_cahi,gbar_nap,shape_scale,tot_frscale,nf_frscale,delay_pnlty,slope_scale,e_dly,ey,efr,e_slope,e) 
+//}
+//printf("\tAP %g\t%g %g %g %g %g %g %g\n",e,gnabar_fn,gkbar_fn,gbar_kca,gbar_ka,gbar_cahi,gbar_nap,pcabar_itGHK)
+	return e
+}
+
+proc calc_shape_error() { local mnind, mxind, i, exind, loc_ind, mtchall, iloop
+    // $o1, $o2 same as for efun()
+    // $3   match_all
+
+    mtchall = $3
+     
+    // mnind : first index of model AP window
+    // mxind : last index of model AP window
+    mnind = $o2.indwhere(">=",boundary.x[0])
+    mxind = $o2.indwhere(">=",boundary.x[1])
+//printf("In calc_shape_error, time indices are [%g, %g]\n",$o2.x[mnind],$o2.x[mxind])
+
+    if( n_modWin == 0 ) {
+
+	// there's no APs; just match the first model peak to the first (or
+	// each selected) AP peak
+
+//printf("peak of subset = %g, values %g - %g - %g\n",$o1.c(mnind,mxind).firstmax,$o1.x[mnind+$o1.c(mnind,mxind).firstmax-1],$o1.x[mnind+$o1.c(mnind,mxind).firstmax],$o1.x[mnind+$o1.c(mnind,mxind).firstmax+1])
+	peak = $o2.x[mnind+$o1.c(mnind,mxind).firstmax]
+	//peak = $o2.x[$o1.firstpeak]
+	xpeak = xdat.x[ydat.firstpeak]
+//printf("Time of first model peak is at %g, value %g\n",peak,$o1.x[mnind+$o1.c(mnind,mxind).firstmax])
+
+	if( (shape_scale > 0) && (apwin.x[1]-apwin.x[0] > 0) ) {
+	    if( mtchall ) {
+//printf("Model shape error from peak:\n")
+//printf("No model win, but Match ALL:  before efun_yfit, time indices are [%g, %g]\n",$o2.x[mnind],$o2.x[mxind])
+	        ey += efun_yfit($o1,$o2,0,exp_APleft,0,$o2.size-1)
+//printf("(4) Return from this AP.\n")
+	    } else {
+	        for i = exp_APleft, exp_APright {
+		    if( useAP.x[i] ) {
+//printf("Shape error from model peak against exp AP %d:\n",i)
+//printf("No model win, match expAP %d:  before efun_yfit, time indices are [%g, %g]\n",i,$o2.x[mnind],$o2.x[mxind])
+		        ey += efun_yfit($o1,$o2,0,i,0,$o2.size-1)
+//printf("(3) Return from this AP.\n")
+		    }
+		    if( EFUN_DBG && VERBOSE ) {
+			dbgfile.printf("%% No model APs\n")
+			dbgfile.printf("ey(%d) = %g;\t",i,ey)
+		    }
+		}
+	    }
+	}
+	if( EFUN_DBG && VERBOSE ) {
+	    dbgfile.printf("\n%% No model APs\n")
+	    dbgfile.printf("peak(1) = %g; xpeak(1) = %g;\n",peak,xpeak)
+	    dbgfile.printf("ey(1) = %g;\n",ey) 
+        }
+
+    } else {
+
+        // for each model AP, either match to each corresponding AP 
+	// (if mtchall), or else match each model AP to each chosen
+	// experimental AP.
+
+//printf("modelAPtimes, from %d to %d\n",mod_APleft,mod_APleft+n_modWin-1)
+//for iloop = mod_APleft,mod_APright {
+//printf("\t[%d] = %g\n",modelAPtimes.x[iloop],$o2.x[modelAPtimes.x[iloop]])
+//}
+	for iloop = 0, n_modWin-1 {
+	//for i = mod_APleft, mod_APright {
+
+            i = mod_APleft + iloop
+//printf("i= %d = %d + %d\n",i,mod_APleft,iloop)
+
+	    peak = $o2.x[$o1.nextpeak(modelAPtimes.x[i])]
+//printf("Found peak %g which is the time of the %d th model AP, index %d\n",peak,i,modelAPtimes.x[i])
+
+	    // If we don't want to limit the AP Win boundaries 
+	    // for neighboring APs, comment out this section
+	    if( i == 0 ) {
+		mnind = $o2.indwhere(">=",boundary.x[0])
+		if( mnind <= 0 ) mnind = 0
+//printf("Set mnind = %d\n",mnind)
+	    } else {
+		// this is where the last peak was, plus twice the time 
+		// diff b/w the last peak and its threshold crossing.
+		// if this occurs later than the prescribed AP window,
+		// use this cutoff instead.  (distance wasn't doubled 
+		// before; this was added 12/14/04).
+//printf("Look for x >= %g = 3*%g - 2*%g\n",3*$o2.x[$o1.nextpeak(modelAPtimes.x[i-1])]-2*$o2.x[modelAPtimes.x[i-1]],$o2.x[$o1.nextpeak(modelAPtimes.x[i-1])],$o2.x[modelAPtimes.x[i-1]])
+		mnind = $o2.indwhere(">=",3*$o2.x[$o1.nextpeak(modelAPtimes.x[i-1])]-2*$o2.x[modelAPtimes.x[i-1]])
+//printf("**Set mnind = %d\n",mnind)
+	    }
+	    if( i == mod_APright ) {
+	        mxind = $o2.indwhere(">=",boundary.x[1])
+	        if( mxind <= 0 ) mxind = $o2.size-1
+//printf("Set mxind = %d\n",mxind)
+	    } else {
+		// upper bound of window is the threshold crossing of 
+		// the next spike, minus the distance from that
+		// next threshold crossing and its AP peak.
+		// (this was changed 12/14/04; was = to next AP thold)
+//printf("Look for x >= %g = 2*%g -%g\n",2*$o2.x[modelAPtimes.x[i+1]]-$o2.x[$o1.nextpeak(modelAPtimes.x[i+1])],$o2.x[modelAPtimes.x[i+1]],$o2.x[$o1.nextpeak(modelAPtimes.x[i+1])])
+		mxind = $o2.indwhere(">=",2*$o2.x[modelAPtimes.x[i+1]]-$o2.x[$o1.nextpeak(modelAPtimes.x[i+1])])
+                if( mxind < 0 ) {
+		    mxind = $o2.size-1
+//printf("\tNot found; use mxind = %d instead\n",mxind)
+		}
+//printf("**Set mxind = %d\n",mxind)
+	    }
+
+	    if( mtchall ) {
+
+		// match model spike i with experimental spike i;
+		// if there are more model spikes, compare the extras
+		// against the last experimental spike
+		if( i-mod_APleft > n_expWin-2 ) { 
+		    exind = exp_APleft+n_expWin-1
+		} else {
+	            exind = exp_APleft + (i - mod_APleft)
+	        }
+		xpeak = xdat.x[ydat.nextpeak(xyAPtimes.x[exind])]
+		loc_ind = exind - exp_APleft
+
+
+		if( EFUN_DBG && VERBOSE ) { 
+
+dbgfile.printf("%% There are %d experimental APs\n",n_expAP)
+dbgfile.printf("%%       and %d experimental AP windows\n",n_expWin)
+dbgfile.printf("%% Comparing target %d (peak %g) with model %d (peak %g)\n",exind,xpeak,i,peak)
+		    dbgfile.printf("%% before efun_yfit\n")
+		    dbgfile.printf("mnind(%d) = %d; mxind(%d) = %d;\n",i+1,mnind,i+1,mxind)
+		    dbgfile.printf("exind(%d) = %d;\n",i+1,exind)
+//print "Match model AP ",i," to experiment AP ",exind
+		    if( i>0 ) { 
+		        dbgfile.printf("t_th(%d)=%g; t_pk(%d)=%g; t_apk(%d)=%g;\n",i+1,$o2.x[modelAPtimes.x[i-1]],i+1,$o2.x[$o1.nextpeak(modelAPtimes.x[i-1])],i+1,$o2.x[mnind]) 
+		    }
+
+		    dbgfile.printf("%% y direction: Y %d X %d\n",ydat_rel_list.object(loc_ind).size,\
+				       xdat_rel_list.object(loc_ind).size)
+		    dbgfile.printf("%% now y:\n ydat_rel%d = [",exind+1)
+		    ydat_rel_list.object(loc_ind).printf(dbgfile)
+		    dbgfile.printf("];\n")
+		    dbgfile.printf("%% now x:\nxdat_rel%d = [",exind+1)
+		    xdat_rel_list.object(loc_ind).printf(dbgfile)
+		    dbgfile.printf("];\n")
+dbgfile.printf("%% here xpeak = %g;\n",xpeak)
+
+	        }
+		if( (shape_scale > 0) && (apwin.x[1]-apwin.x[0] > 0 )) { 
+//printf("MULT model win, Match ALL:  before efun_yfit, time indices are [%g, %g]\n",$o2.x[mnind],$o2.x[mxind])
+		    ey += efun_yfit($o1,$o2,i,exind,mnind,mxind,0) 
+//printf("(2) Return from this AP, ey now %g.\n",ey)
+		}
+		if( EFUN_DBG && VERBOSE ) { 
+dbgfile.printf("%% first pass\n")
+		    dbgfile.printf("peak(%d) = %g; xpeak(%d) = %g;\n",i+1,peak,i-mod_APleft+exp_APleft+1,xpeak)
+	            dbgfile.printf("ey(%d) = %g;\n",i+1,ey) 
+		}
+	    } else {
+
+		// loop over all chosen experimental spikes
+
+	        for exind = exp_APleft, exp_APright {
+
+		    loc_ind = exind - exp_APleft
+
+		    //printf("Chose specific APs.  Compare model AP %d to exp AP %d",i,exind)
+		    if( !useAP.x[exind] ) {
+		    
+		        if( EFUN_DBG && VERBOSE ) { 
+	                    dbgfile.printf("ey(%d) = %g;\n",i+1,ey) 
+		        }
+		        continue
+		    }
+
+		    xpeak = xdat.x[ydat.nextpeak(xyAPtimes.x[exind])]
+
+		    if( EFUN_DBG && VERBOSE ) {
+		        dbgfile.printf("%% before efun_yfit\n")
+			dbgfile.printf("mnind(%d) = %d; mxind(%d) = %d;\n",i+1,mnind,i+1,mxind)
+			dbgfile.printf("exind(%d) = %d;\n",i+1,exind)
+			print "Match model AP ",i," to experiment AP ",exind
+		        if( i>0 ) { 
+		            dbgfile.printf("t_th(%d)=%g; t_pk(%d)=%g; t_apk(%d)=%g;\n",i+1,$o2.x[modelAPtimes.x[i-1]],i+1,$o2.x[$o1.nextpeak(modelAPtimes.x[i-1])],i+1,$o2.x[mnind]) 
+		        }
+
+			dbgfile.printf("%% y direction: Y %d X %d\n",ydat_rel_list.object(loc_ind).size,\
+				       xdat_rel_list.object(loc_ind).size)
+		        dbgfile.printf("%% now y:\n ydat_rel%d = [",exind+1)
+			ydat_rel_list.object(loc_ind).printf(dbgfile)
+			dbgfile.printf("];\n")
+			dbgfile.printf("%% now x:\nxdat_rel%d = [",exind+1)
+			xdat_rel_list.object(loc_ind).printf(dbgfile)
+			dbgfile.printf("];\n")
+
+	            }
+		    if( (shape_scale > 0) && (apwin.x[1]-apwin.x[0] > 0 )) { 
+//printf("MULT model win, match AP %d:  before efun_yfit, time indices are [%g, %g]\n",i,$o2.x[mind],$o2.x[mxind])
+		        ey += efun_yfit($o1,$o2,i,exind,mnind,mxind,0) 
+//printf("(1)  Return from this AP.\n")
+		    }
+		    if( EFUN_DBG && VERBOSE ) { 
+dbgfile.printf("%% second pass\n")
+		        dbgfile.printf("peak(%d) = %g; xpeak(%d) = %g;\n",i+1,peak,i-mod_APleft+exp_APleft+1,xpeak)
+			dbgfile.printf("ey(%d) = %g;\n",i+1,ey) 
+		    }
+
+		}   // end of exp spike loop
+	    }	// end else
+	} // end of modelAP loop
+
+	if( shape_scale > 0 ) { 
+//printf("Now scaling the shape error %g by %g / %d\n",ey,shape_scale,n_modWin)
+            ey *= shape_scale / n_modWin
+            //ey *= shape_scale / n_modAP 
+	} else { ey = 0 }
+	//if( shape_scale > 0 ) { ey *= shape_scale / n_modAP } else { ey = 0 }
+	if( EFUN_DBG && VERBOSE ) { 
+		dbgfile.printf("ey_mean = %g;\n",ey)
+	    }
+	}
+//printf("Returning from calc_shape_error()\n")
+
+}
+
+
+// Penalize ISI's which are less than a user-specified threshold brst_thold, 
+// by a user specified amount brst_pnlty
+//
+// This will penalize doublets and bursting.
+//
+func efun_penburst() { local etot, eisi, cnt
+
+	etot = 0
+	cnt = 0
+
+	for i = mod_APleft, mod_APright-1 {
+	    eisi = $o1.x[modelAPtimes.x[i+1]] - $o1.x[modelAPtimes.x[i]]
+	    if( eisi <= brst_thold ) { 
+		etot += brst_pnlty
+		cnt += 1
+
+		if( EFUN_DBG && VERBOSE ) {
+                    if( i >= 0 )  {
+			dbgfile.printf("eISI(%d)=%g;\n",i+1,brst_pnlty)
+		    } else {
+			dbgfile.printf("fprintf('Trouble!  Found ISI index %d\\n');\n",i+1)
+                        dbgfile.printf("eISI(1)=%g;\n",brst_pnlty)
+		    }
+		}
+	    } else {
+	        if( EFUN_DBG && VERBOSE ) {
+		    if( i >= 0 ) {
+			dbgfile.printf("eISI(%d)=0;\n",i+1)
+		    }  else {
+			dbgfile.printf("fprintf('Trouble!  Found ISI index %d\n');\n",i+1)
+                        dbgfile.printf("eISI(1)=0;\n")
+		    }
+		}
+	    }
+	}
+
+	if( EFUN_DBG ) {
+	    //dbgfile.printf("str(%d) = {'ISI burst penalty (%d times)    %g'};\n", nstr,cnt,etot)
+	    //nstr += 1
+	    dbgfile.printf("lbl(%d) = {'ISI burst penalty (%d times)    %g'};\n", nlbl,cnt,etot)
+	    nlbl += 1
+	    printf("ISI burst penalty (%d times)    %g\n", cnt,etot)
+	}
+
+	return etot
+}
+
+
+/***********************************************************************
+
+    Penalize the difference between the target and model delay to first spike.
+
+    Let 
+        S0   =  first target spike between the error bounds
+	s0   =  first model  spike between the error bounds 
+	        (this equals bounds.x[1]-bounds.x[0] if there is no model spike)
+	tISI =  the mean target ISI during the error period, 
+	        i.e. reciprocal of mean FR (in ms).
+
+    Then the first spike penalty is given by
+
+        (S0 - s0)^2 / tISI^2, 
+
+    that is, the mean squared difference between the first spike times, 
+    normalized as a multiple of the mean target ISI. 
+
+    This penalty is scaled by the factor DELAY_PNLTY.
+
+    INPUT    $o1    y values of model output
+             $o2    t values of model output
+
+
+***********************************************************************/
+func efun_pendelay() { local errval, mISI, tspk, mspk
+
+    if( n_expAP < 1 ) return 0
+
+    //
+    // determine first spike times for target and model
+    //
+    tspk = xdat.x[xyAPtimes.x[exp_APleft]]
+    if( n_modAP == 0 ) {
+        mspk = boundary.x[1]
+    } else {
+        mspk = $o2.x[modelAPtimes.x[mod_APleft]]
+    }
+//printf("tspk %g - mspk %g = %g\n",tspk,mspk,tspk-mspk)
+
+    //
+    // determine the mean ISI (in ms) during the error bounds
+    //
+    if( n_expAP == 1 ) {
+        mISI = boundary.x[1] - tspk
+    } else {
+	/****
+        printf("calculating the mean FR between spike %d to %d\n",exp_APleft,exp_APright)
+	printf("all target spike times : ")
+	xdat.ind(xyAPtimes).printf
+	printf("all of datFR = ")
+        datFR.printf()
+	printf("we care about indices from %d to %d:  ",exp_APleft,exp_APright-1)
+        datFR.printf("%g ",exp_APleft,exp_APright-1)
+	****/
+
+        if( exp_APright-exp_APleft > 2 ) {
+            mISI = 1000 / datFR.mean(exp_APleft,exp_APright-1)
+	} else {
+	    mISI = 1000 / datFR.x[exp_APleft]
+	}
+
+        //printf("found mean ISI %g\n",mISI)
+    }
+
+
+    errval = ( (tspk - mspk) / mISI ) ^ 2
+
+    //printf("found error %g; tspk %g, mspk %g, mISI %g, times %g\n",errval,tspk,mspk,mISI,delay_pnlty)
+
+    if( EFUN_DBG ) {
+        //dbgfile.printf("str(%d) = {'First spike delay penalty (times %g)    %g'};\n", nstr,delay_pnlty,errval)
+	//nstr += 1
+        dbgfile.printf("lbl(%d) = {'First spike delay penalty (times %g)    %g'};\n", nlbl,delay_pnlty,errval)
+	nlbl += 1
+	printf("First spike delay penalty (times %g)    %g\n", delay_pnlty, errval)
+        if( VERBOSE ) {
+	    dbgfile.printf("e_dly = %g;\n",errval)
+        }
+   } 
+
+    return delay_pnlty * errval
+}
+
+// the least squares error function in y
+func efun_yfit() { local e, xtmp_modind, tmp_expind, e_old, mnind, mxind, loc_ind, eval, idx
+			         // only use e_old for debug
+
+        // INPUT:
+	// $o1	y-values of model output (e.g soma.v(.5) )
+	// $o2	t-values of model output (time, ms)
+        mod_ind = $3
+        exp_ind = $4
+	loc_ind = exp_ind - exp_APleft
+	mnind   = $5
+	mxind   = $6
+
+	objref xtmp, ytmp
+
+	xtmp = xdat_rel_list.object(loc_ind)
+	ytmp = ydat_rel_list.object(loc_ind)
+
+//printf("In EFUN_YFIT():  the model data go from t = %g to %g\n",$o2.x[mnind],$o2.x[mxind])
+
+	e = 0
+
+        if( EFUN_DBG ) { 
+	    dbgfile.printf("%% e = %g; peak=%g;	xpeak=%g;\n",e,peak,xpeak) 
+	}
+
+	if( n_modAP > 0 ) {
+	    tmp_modind = $o1.nextpeak(modelAPtimes.x[mod_ind])
+	} else { tmp_modind = $o1.firstmax }
+
+	if ( xdat_rel_list.object(loc_ind).size > 0 ) {
+
+	    if( EFUN_DBG ) { 
+	        e_old = e 
+		tmp_expind = ytmp.firstpeak
+		dbgfile.printf("%% Before yfitness, model peak = %g (%g, %g - %g - %g), ",\
+			tmp_modind,$o2.x[tmp_modind],$o1.x[tmp_modind-1],$o1.x[tmp_modind],$o1.x[tmp_modind+1])
+
+		dbgfile.printf("exp peak = %g (%g, %g - %g - %g	)\n",tmp_expind,xtmp.x[tmp_expind],\
+			ytmp.x[tmp_expind]-1,ytmp.x[tmp_expind],ytmp.x[tmp_expind+1])
+	    }
+
+//printf("Calling ywnscl_fitness MDx.sz %d, MDy.sz %d; TGx.sz %d TGy.sz %d\n",$o1.size,$o2.size,ytmp.size,xtmp.size)
+//printf("\tmodel pkind = %d [%g, %g], exp pk ind %d [%g, %g];",tmp_modind,$o2.x[tmp_modind],$o1.x[tmp_modind],ytmp.firstpeak,xtmp.x[ytmp.firstpeak],ytmp.x[ytmp.firstpeak])
+//printf(" time indices [%g, %g]\n",$o2.x[mnind],$o2.x[mxind])
+	    eval = $o1.ywnscl_fitness($o2, peak, ytmp, xtmp,ytmp.firstpeak,tmp_modind,mnind,mxind)
+            if( eval >= 0 ) {
+//printf("This AP shape error = %g\n",eval)
+	        e += eval
+            } else {
+		printf("Error!  No model window was found; shape error for this AP is -1.\n")
+            }
+
+            if( EFUN_DBG ) {
+	        dbgfile.printf("%% yfitness %s Y %d X %d\n",$o2.label,peak,ytmp.size,xtmp.size)
+	        dbgfile.printf("ey_scale(%d) = %g;\n",mod_ind+1,e-e_old)
+		dbgfile.printf("tgt_AP{%d} = [\n",loc_ind+1)
+                for idx = 0, ytmp.size()-1 {
+		    dbgfile.printf("\t%g\t%g\n",xtmp.x[idx],ytmp.x[idx])
+                }
+		dbgfile.printf("];\n")
+            }
+	}
+
+        if( EFUN_DBG ) { dbgfile.printf("e_1AP(%d)=%g;\n",mod_ind+1,e) }
+
+	return e
+}
+
+
+func efun_expfit() { local mnind, mxind, lastfr, err, i, tauerr, Aerr
+        // INPUT:
+	// $o1	y-values of model output (e.g soma.v(.5) )
+	// $o2	t-values of model output (time, ms)
+
+
+    ntag = ""
+
+    mnind = exp_APleft
+    mxind = exp_APright-1
+
+    //
+    //  First, perform a linear fit to the target data.
+    //
+
+//printf("Start of target fit: mnind = %d, mxind = %d.\n",mnind,mxind)
+    datFit = new Vector()
+    if( mxind < 0 || mnind < 0 || (mxind-mnind < 1) ) {
+	// Not enough experimental spikes to fit a line
+//printf("Target data (%d to %d): not enough spikes.\n",mnind,mxind)
+	pen_silent = 0
+	exp_intcpt = exp_slope = 0
+	expsa = expsb = expchi = 0
+
+    } else {
+
+        // do the linear fit
+	ptra = new Pointer(&exp_intcpt)
+	ptrb = new Pointer(&exp_slope)
+	ptrsiga = new Pointer(&expsa)
+	ptrsigb = new Pointer(&expsb)
+	ptrchi  = new Pointer(&expchi)
+        ytmp = new Vector()
+        ytmp = datFR.c
+        for i = 0, ytmp.size-1 {
+	   ytmp.x[i] = log(datFR.x[i])
+        }
+	/****
+	printf("TARGET DATA:  Exponential fit, Fitting times: \n")
+	xdat.ind(xyAPtimes).printf
+	printf("And firing rates:  \n")
+	datFR.printf
+	printf("Converted to log:\n")
+	ytmp.printf
+	printf("Done converting target data, now fit.\n")
+	***/
+	linfit(xdat.ind(xyAPtimes),ytmp,mnind,mxind,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+	//printf("Done the fit, now convert parameters.\n")
+	//printf("Lin fit complete, %g and %g\n",ptra.val,ptrb.val)
+
+	exp_intcpt   = exp(ptra.val)
+	if( exp_slope == 0 || ptrb.val == 0 ) {
+	    exp_slope = -999999.99
+	} else {
+	    exp_slope    = -1 / ptrb.val
+	}
+	expsa  = ptrsiga.val
+	expsb  = ptrsigb.val
+	expchi = ptrchi.val
+
+	// target data *is* firing APs; add extra penalty for non-firing models
+	pen_silent = 1
+	//printf("Finished doing the fit; now check it.\n")
+
+        // use the exponential fit to estimate firing rates at each of the TARGET AP times.
+        for i = mnind, mxind {
+          datFit.append(exp_intcpt*exp(-1*xdat.x[xyAPtimes.x[i]]/exp_slope))
+        }
+	//printf("Done the lineup.\n")
+    }
+
+
+    //
+    //  Now, perform a linear fit to the model data.
+    //
+
+
+    mmnind = mod_APleft
+    mmxind = mod_APright-1
+
+
+//printf("Now for model data:  Before starting fit.\n")
+    if( mmxind < 0 || mmnind < 0 || mmxind-mmnind < 1 ) {
+        modsa = modsb = modchi = 0
+        mod_slope = -999999.99		// as if they're already transformed
+        mod_intcpt = 1
+    } else {
+
+        // do the linear fit
+        ptra = new Pointer(&mod_intcpt)
+        ptrb = new Pointer(&mod_slope)
+	ptrsiga = new Pointer(&modsa)
+	ptrsigb = new Pointer(&modsb)
+	ptrchi  = new Pointer(&modchi)
+        ytmp = new Vector()
+        ytmp = modFR.c
+        for i = 0, ytmp.size-1 {
+	   ytmp.x[i] = log(modFR.x[i])
+        }
+	/***
+	printf("MODEL DATA:  Exponential fit, Fitting times: \n")
+	$o2.ind(modelAPtimes).printf
+	printf("And firing rates:  \n")
+	modFR.printf
+	printf("Converted to log:\n")
+	ytmp.printf
+	printf("Copied data, now do lin fit.\n")
+	***/
+	linfit($o2.ind(modelAPtimes),ytmp,mmnind,mmxind,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+	//printf("Lin fit complete, %g and %g\n",ptra.val,ptrb.val)
+	mod_intcpt   = exp(ptra.val)
+	if( mod_slope == 0 || ptrb.val == 0 ) {
+	    mod_slope = -999999.99
+	} else {
+	    mod_slope    = -1 / ptrb.val
+	}
+	modsa  = ptrsiga.val
+	modsb  = ptrsigb.val
+	modchi = ptrchi.val
+    }
+	//printf("Done fitting model data.\n")
+
+    // if there are enough spikes, 
+    // use the exponential fit to estimate firing rates at each of the TARGET AP times.
+    modFit = new Vector()
+    if( mxind-mnind >= 1 ) {
+
+        for i = mnind, mxind {
+          modFit.append(mod_intcpt*exp(-1*xdat.x[xyAPtimes.x[i]]/mod_slope))
+        }
+        //printf("Target fit estimated.\n")
+    } else {
+	// there are MODEL AP's, but no TARGET AP's.  Redefine both datFit & modFit,
+	// relative to the MODEL AP's.
+
+        if( mmxind-mmnind >= 1 ) {
+	    //printf("Using MODEL ap's as template.\n")
+            datFit = new Vector()
+            for i = mmnind, mmxind {
+              datFit.append(exp_intcpt*exp(-1*$o2.x[modelAPtimes.x[i]]/exp_slope))
+            }
+	    //printf("Redefining datFit = ")
+	    //datFit.printf
+
+            modFit = new Vector()
+            for i = mmnind, mmxind {
+              modFit.append(mod_intcpt*exp(-1*$o2.x[modelAPtimes.x[i]]/mod_slope))
+            }
+   	    //printf("Redefining modFit = ")
+	    //printf("After y = %g * x + %g, datFit = ",mod_slope,mod_intcpt)
+	    //modFit.printf
+        }
+
+    }
+
+
+    if( EFUN_DBG ) {
+         
+	printf("Fitting an exponential to the FR data\n")
+        printf("Experiment LSFIT tau %.8f +- %.8f\n",exp_slope,expsb)
+	printf("Experiment       A0  %.8f +- %.8f\n",exp_intcpt,expsa)
+	printf("Experiment       chi_sq %.8f\n\n",expchi)
+	//sprintf(title,"y = %.2f + %.2f * x\0",a,b)
+        printf("Model      LSFIT tau %.8f +- %.8f\n",mod_slope,modsb)
+	printf("Model            A0  %.8f +- %.8f\n",mod_intcpt,modsa)
+	printf("Model            chi_sq %.8f\n\n",modchi)
+
+	nstr2 = 1
+	dbgfile.printf("str2(%d) = {'Exponential FR fit'};\n",nstr2)
+	nstr2 += 1
+        dbgfile.printf("str2(%d) = {'Exper LSFIT tau %g +- %g'};\n",nstr2,exp_slope,expsb)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Exper       A0  %.8f +- %.8f'};\n",nstr2,exp_intcpt,expsa)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Exper       chi_sq %.8f'};\n\n",nstr2,expchi)
+	nstr2 += 1
+        dbgfile.printf("str2(%d) = {'Model LSFIT tau %.8f +- %.8f'};\n",nstr2,mod_slope,modsb)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Model       A0  %.8f +- %.8f'};\n",nstr2,mod_intcpt,modsa)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Model       chi_sq %.8f'};\n\n",nstr2,modchi)
+	nstr2 += 1
+    }
+    
+    
+    //
+    //  Calculate the RMS error between the model fit and the target fit,
+    //  evaluated at each target AP time. 
+    //
+
+ /********
+    err = 0
+    for i = 0, modFit.size-1 {
+	if( EFUN_DBG ) {
+	    printf("Err was %f; Add SQR( E %f - M %f)\n",err,datFit.x[i],modFit.x[i])
+	    dbgfile.printf("str2(%d) = {'Exp AP %d, error %f'};\n",nstr2,i,SQR(datFit.x[i]-modFit.x[i]))
+	    nstr2 += 1
+	}
+	err += SQR(datFit.x[i]-modFit.x[i])
+    }
+    if( modFit.size > 0 ) {
+	err = sqrt( err / modFit.size )
+    }
+
+    //
+    //	Scale the error further as an extra penalty for models which do not
+    //  fire.  The scaling factor is defined by the user in scale_factors() below.
+    //  This extra penalty is only applied when the target does exhibit APs.
+    //
+    if( pen_silent && (mmxind-mmnind < 2) ) {
+	err *= nf_frscale
+	sprint(ntag,"(silent - extra scaled by %f)",nf_frscale)
+    }
+
+    if( EFUN_DBG ) {
+	dbgfile.printf("str2(%d) = {'Total exponential fit error = %.2f * %.2f %s'};\n\n",nstr2,err,tot_frscale,ntag)
+	print "Total exponential fit error = ",err," * ",tot_frscale, ntag
+	nstr2 += 1
+    }
+******/
+
+intcp_scale = 0.5
+slope_scale = 0.005
+
+    // Add the error between the two components of the fit:  The initial offset, and the time constant.
+    err = 0
+    if( EFUN_DBG ) {
+    }
+    Aerr = intcp_scale * abs(exp_intcpt - mod_intcpt)
+    tauerr = slope_scale * abs(exp_slope-mod_slope)
+    err = Aerr + tauerr
+    if( EFUN_DBG ) {
+	dbgfile.printf("str2(%d) = {'Error in initial FR = %.2f * %.2f = %2f'};\n\n",nstr2, intcp_scale,abs(exp_intcpt-mod_intcpt),Aerr)
+	dbgfile.printf("str2(%d) = {'Error in time constants = %.2f * %.2f = %2f'};\n\n",nstr2, slope_scale,abs(exp_slope-mod_slope),tauerr)
+	print "Error in initial FR = ", intcp_scale, " * ", abs(exp_intcpt-mod_intcpt)," = ",Aerr
+	print "Error in time constants = ", slope_scale, " * ", abs(exp_slope-mod_slope)," = ",tauerr
+	print "Total exponential fit error = ",err
+	nstr2 += 1
+    }
+
+
+    return err
+
+
+
+
+
+/****
+	mnind = xyAPtimes.indwhere(">=",boundary.x[0])
+	mxind = xyAPtimes.indwhere(">=",boundary.x[1])
+	if( mxind == -1 ) { mxind = xyAPtimes.size-1 }
+
+	// recall, FR calculated *between* spikes, so there's one less value at
+	// the end than the spike times.
+	if( mxind == xyAPtimes.size-1 ) { 
+	    lastfr = mxind-1 
+	} else {lastfr = mxind } 
+
+     // fit straight line to log(exp FR) first
+     ptra = new Pointer(&exp_intcpt)
+     ptrb = new Pointer(&exp_slope)
+     ptrsiga = new Pointer(&expsa)
+     ptrsigb = new Pointer(&expsb)
+     ptrchi  = new Pointer(&expchi)
+     ytmp = new Vector()
+     ytmp = datFR.c
+     for i = 0, ytmp.size-1 {
+	 ytmp.x[i] = log(ytmp.x[i])
+     }
+     linfit(xyAPtimes,ytmp,mnind,lastfr,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+     exp_intcpt   = ptra.val
+     exp_slope   = ptrb.val
+     expsa  = ptrsiga.val
+     expsb  = ptrsigb.val
+     expchi = ptrchi.val
+
+     datFit = new Vector()
+     datFit = xyAPtimes.c
+     //datFit = xdat.c
+     datFit.mul(exp_slope)
+     for i=0, datFit.size-1 {
+	 datFit.x[i] = exp(datFit.x[i])
+     }
+     datFit.mul(exp(exp_intcpt))
+
+	mnind = modelAPtimes.indwhere(">=",boundary.x[0])
+	mxind = modelAPtimes.indwhere(">=",boundary.x[1])
+	if( mxind == -1 ) { mxind = modelAPtimes.size-1 }
+
+	// recall, FR calculated *between* spikes, so there's one less value at
+	// the end than the spike times.
+	if( mxind == modelAPtimes.size-1 ) { 
+	    lastfr = mxind-1 
+	} else {lastfr = mxind } 
+
+     // now fit straight line to mod FR first
+     ptra = new Pointer(&mod_intcpt)
+     ptrb = new Pointer(&mod_slope)
+     ptrsiga = new Pointer(&modsa)
+     ptrsigb = new Pointer(&modsb)
+     ptrchi  = new Pointer(&modchi)
+     ytmp = new Vector()
+     ytmp = modFR.c
+     for i = 0, ytmp.size-1 {
+	 ytmp.x[i] = log(ytmp.x[i])
+     }
+     linfit(modelAPtimes,ytmp,mnind,lastfr,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+     mod_intcpt   = ptra.val
+     mod_slope   = ptrb.val
+     modsa  = ptrsiga.val
+     modsb  = ptrsigb.val
+     modchi = ptrchi.val
+
+     modFit = new Vector()
+     modFit = xyAPtimes.c
+     //modFit = xdat.ind(xyAPtimes).c
+     //modFit = xdat.c
+     modFit.mul(mod_slope)
+     for i=0, modFit.size-1 {
+	 modFit.x[i] = exp(modFit.x[i])
+     }
+     modFit.mul(exp(mod_intcpt))
+
+     if( EFUN_DBG ) {
+	 printf("Fitting an exponential to the FR data\n")
+         printf("Experiment LSFIT decay rate %.8f +- %.8f\n",exp_slope,expsb)
+	 printf("Experiment       peak %.8f +- %.8f\n",exp(exp_intcpt),exp(expsa))
+	 printf("Experiment       chi_sq %.8f\n\n",expchi)
+	 //sprintf(title,"y = %.2f + %.2f * x\0",a,b)
+         printf("Model      LSFIT decay rate %.8f +- %.8f\n",mod_slope,modsb)
+	 printf("Model            peak %.8f +- %.8f\n",exp(mod_intcpt),exp(modsa))
+	 printf("Model            chi_sq %.8f\n\n",modchi)
+
+	 nstr2 = 1
+	 dbgfile.printf("str2(%d) = {'Exponential FR fit'};\n",nstr2)
+	 nstr2 += 1
+         dbgfile.printf("str2(%d) = {'Exper LSFIT slope %g +- %g'};\n",nstr2,exp_slope,expsb)
+	 nstr2 += 1
+	 dbgfile.printf("str2(%d) = {'Exper       int %.8f +- %.8f'};\n",nstr2,exp_intcpt,expsa)
+	 nstr2 += 1
+	 dbgfile.printf("str2(%d) = {'Exper       chi_sq %.8f'};\n\n",nstr2,expchi)
+	 nstr2 += 1
+         dbgfile.printf("str2(%d) = {'Model LSFIT slope %.8f +- %.8f'};\n",nstr2,mod_slope,modsb)
+	 nstr2 += 1
+	 dbgfile.printf("str2(%d) = {'Model       int %.8f +- %.8f'};\n",nstr2,mod_intcpt,modsa)
+	 nstr2 += 1
+	 dbgfile.printf("str2(%d) = {'Model       chi_sq %.8f'};\n\n",nstr2,modchi)
+	 nstr2 += 1
+     }
+
+     err = 0
+     for i = 0, modFit.size-1 {
+	 if( EFUN_DBG ) {
+	   printf("Err was %f;\tAdd SQR(E %f - M %f)\n",err,datFit.x[i],modFit.x[i])
+	 }
+	 err += SQR(datFit.x[i]-modFit.x[i])
+
+     }
+     err = sqrt(err)
+//printf("Total time-modulated FR errro is %f\n",err)
+     //if( modFit.size > 1 ) { err /= modFit.size } else { err = 0 }
+*****/
+
+     return err
+}
+
+
+
+/*
+*	From NUMERICAL RECIPES IN C
+*
+*	Given a set of points x[strt ... end], y[strt ... end], with standard
+*	deviations sig[strt ... end], fit them to
+*
+*			y = a + bx		(!!!!!!!!!)
+*
+*	by minimizing chi_sq.
+*	Returned are a,b, siga, sigb, chi_sq (chi2), and the goodness of fit
+*	probability q (that the fit would have chi_sq this large or larger).
+*	If mwt = 0 *	on input, then the standard deviations are assumed
+*	unavailable, q is returned as 1.0, and the normalization of chi2
+*	is to unit standard deviation on all points.
+*/
+
+func SQR() { return $1*$1 }
+
+proc linfit() { local strt, endfit, a,b,siga,sigb,chi2, i,wt,tfit,sxoss,ss, sigdat, sx, sy, st2, ndata
+	// x = $o1
+	// y = $o2
+
+	strt = $3
+	endfit  = $4
+	ndata = endfit-strt+1
+
+	//printf("start of linfit():  start at %d, end at %d\n",strt,endfit)
+	//$o1.printf
+	//$o2.printf
+
+	//printf("1st %d=(%g,%g), last %d=(%g,%g)\n",strt,$o1.x[strt],$o2.x[strt],endfit,$o1.x[endfit],$o2.x[endfit])
+
+	sx  = 0.0
+	sy  = 0.0
+	st2 = 0.0
+
+	b = 0.0
+	for i = strt, endfit {
+	    sx += $o1.x[i]	sy += $o2.x[i]
+	}
+	ss = endfit+1-strt
+
+	//printf("sx=%g\tsy=%g\tss=%g\n",sx,sy,ss)
+
+	sxoss = sx/ss
+	//printf("sxoss = %g\n",sxoss)
+	for i = strt, endfit {
+	    tfit = $o1.x[i] - sxoss
+	    st2 += tfit*tfit
+	    b += tfit*$o2.x[i]
+	}
+	
+
+	//printf("st2=%g\tb=%g\n",st2,b)
+	b /= st2
+	a = (sy-sx*b)/ss
+	//printf("a=%g\n",a)
+	siga = sqrt((1.0 + sx*sx/(ss*st2))/ss)
+	sigb = sqrt(1.0/st2)
+	chi2 = 0.0
+	for i = strt, endfit { chi2 += SQR($o2.x[i]-a-b*$o1.x[i]) }
+	if( ndata > 2 ) { sigdat = sqrt(chi2/ndata) 
+	} else { sigdat = 0 }
+	siga *= sigdat
+	sigb *= sigdat
+
+	/***
+     if( EFUN_DBG ) {
+         printf("LSFIT slope %.8f +- %.8f\n",b,sigb)
+	 printf("      int %.8f +- %.8f\n",a,siga)
+	 printf("      chi_sq %.8f\n\n",chi2)
+	 //sprintf(title,"y = %.2f + %.2f * x\0",a,b)
+     }
+	***/
+
+	$o5.val = a
+	$o6.val = b
+	$o7.val = siga
+	$o8.val = sigb
+	$o9.val = chi2
+}
+
+
+/*******************************
+
+	Return RMS residual between target instantaneous firing rates, and
+	firing rates at those same target times, as estimated by a linear fit
+	of the model instantaneous firing rates.
+
+*******************************/
+func efun_linfit() { local mnind, mxind, err, pen_silent, mmnind, mmxind
+        // INPUT:
+	// $o1	y-values of model output (e.g soma.v(.5) )
+	// $o2	t-values of model output (time, ms)
+
+    ntag = ""
+
+    mnind = exp_APleft
+    mxind = exp_APright - 1
+
+    //
+    //  First, perform a linear fit to the target data.
+    //
+
+    datFit = new Vector()
+    if( mxind < 0 || mnind < 0 || (mxind-mnind < 1) ) {
+	// Not enough experimental spikes to fit a line
+//printf("Target data (%d to %d): not enough spikes.\n",mnind,mxind)
+	pen_silent = 0
+	exp_intcpt = exp_slope = 0
+	expsa = expsb = expchi = 0
+
+    } else {
+
+
+        // do the linear fit
+	ptra = new Pointer(&exp_intcpt)
+	ptrb = new Pointer(&exp_slope)
+	ptrsiga = new Pointer(&expsa)
+	ptrsigb = new Pointer(&expsb)
+	ptrchi  = new Pointer(&expchi)
+/****
+printf("TARGET DATA:  Linear fit, Fitting times (%d to %d): \n",mnind,mxind)
+xdat.ind(xyAPtimes.c(mnind,mxind)).printf
+printf("And firing rates:  \n")
+datFR.printf
+****/
+	linfit(xdat.ind(xyAPtimes),datFR,mnind,mxind,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+	exp_intcpt   = ptra.val
+	exp_slope   = ptrb.val
+	expsa  = ptrsiga.val
+	expsb  = ptrsigb.val
+	expchi = ptrchi.val
+
+	// target data *is* firing APs; add extra penalty for non-firing models
+	pen_silent = 1
+
+//printf("Defining model data.\n")
+    datFit = xdat.ind(xyAPtimes).c(mnind,mxind)
+//printf("Redefining datFit = ")
+//datFit.printf
+        datFit.mul(exp_slope)
+        datFit.add(exp_intcpt)
+//printf("After y = %g * x + %g, datFit = ",exp_slope,exp_intcpt)
+//datFit.printf
+    }
+
+
+
+
+    //
+    //  Now, perform a linear fit to the model data.
+    //
+
+    mmnind = mod_APleft
+    mmxind = mod_APright - 1
+
+
+    if( mmxind < 0 || mmnind < 0 || mmxind-mmnind < 1 ) {
+//printf("Not enough model APs.  %d - %d\n",mmnind,mmxind)
+        mod_intcpt = mod_slope = modsa = modsb = modchi = 0
+    } else {
+
+//printf("Now doing linear fit for model APs.  %d - %d\n",mmnind,mmxind)
+
+        // do the linear fit
+        ptra = new Pointer(&mod_intcpt)
+        ptrb = new Pointer(&mod_slope)
+	ptrsiga = new Pointer(&modsa)
+	ptrsigb = new Pointer(&modsb)
+	ptrchi  = new Pointer(&modchi)
+	/****
+	printf("MODEL DATA:  Linear fit, Fitting times: \n")
+	$o2.ind(modelAPtimes).printf
+	printf("And firing rates:  \n")
+	modFR.printf
+	****/
+	linfit($o2.ind(modelAPtimes),modFR,mmnind,mmxind,ptra,ptrb,ptrsiga,ptrsigb,ptrchi)
+	mod_intcpt   = ptra.val
+	mod_slope   = ptrb.val
+	modsa  = ptrsiga.val
+	modsb  = ptrsigb.val
+	modchi = ptrchi.val
+    }
+
+    // if there are enough spikes, 
+    // use the linear fit to estimate firing rates at each of the TARGET AP times.
+    modFit = new Vector()
+    //printf("Exp APs go from %d to %d\n",mnind,mxind+1)
+    //printf("Mod APs go from %d to %d\n",mmnind,mmxind+1)
+
+    if( mxind-mnind >= 1 ) {
+
+//printf("Using TARGET ap's as template.\n")
+        modFit = xdat.ind(xyAPtimes).c(mnind,mxind)
+//printf("Redefining modFit = ")
+//modFit.printf
+        modFit.mul(mod_slope)
+        modFit.add(mod_intcpt)
+//printf("After y = %g * x + %g, datFit = ",mod_slope,mod_intcpt)
+//modFit.printf
+
+    } else {
+	// there are MODEL AP's, but no TARGET AP's.  Redefine both datFit & modFit,
+	// relative to the MODEL AP's.
+
+        if( mmxind-mmnind >= 1 ) {
+	    //printf("Using MODEL ap's as template.\n")
+            datFit = new Vector()
+            datFit = $o2.ind(modelAPtimes).c(mmnind,mmxind)
+	    //printf("Redefining datFit = ")
+	    //datFit.printf
+            datFit.mul(exp_slope)
+            datFit.add(exp_intcpt)
+	    //printf("After y = %g * x + %g, datFit = ",exp_slope,exp_intcpt)
+	    //datFit.printf
+
+            modFit = new Vector()
+            modFit = $o2.ind(modelAPtimes).c(mmnind,mmxind)
+   	    //printf("Redefining modFit = ")
+	    //modFit.printf
+            modFit.mul(mod_slope)
+            modFit.add(mod_intcpt)
+	    //printf("After y = %g * x + %g, datFit = ",mod_slope,mod_intcpt)
+	    //modFit.printf
+        }
+
+
+    }
+
+    if( EFUN_DBG ) {
+         
+	printf("Fitting a straight line to the FR data\n")
+        printf("Experiment LSFIT slope %.8f +- %.8f\n",exp_slope,expsb)
+	printf("Experiment       int %.8f +- %.8f\n",exp_intcpt,expsa)
+	printf("Experiment       chi_sq %.8f\n\n",expchi)
+	//sprintf(title,"y = %.2f + %.2f * x\0",a,b)
+        printf("Model      LSFIT slope %.8f +- %.8f\n",mod_slope,modsb)
+	printf("Model            int %.8f +- %.8f\n",mod_intcpt,modsa)
+	printf("Model            chi_sq %.8f\n\n",modchi)
+
+	nstr2 = 1
+	dbgfile.printf("str2(%d) = {'Straight line FR fit'};\n",nstr2)
+	nstr2 += 1
+        dbgfile.printf("str2(%d) = {'Exper LSFIT slope %g +- %g'};\n",nstr2,exp_slope,expsb)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Exper       int %.8f +- %.8f'};\n",nstr2,exp_intcpt,expsa)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Exper       chi_sq %.8f'};\n\n",nstr2,expchi)
+	nstr2 += 1
+        dbgfile.printf("str2(%d) = {'Model LSFIT slope %.8f +- %.8f'};\n",nstr2,mod_slope,modsb)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Model       int %.8f +- %.8f'};\n",nstr2,mod_intcpt,modsa)
+	nstr2 += 1
+	dbgfile.printf("str2(%d) = {'Model       chi_sq %.8f'};\n\n",nstr2,modchi)
+	nstr2 += 1
+    }
+    
+    //
+    //  Calculate the RMS error between the model fit and the target fit,
+    //  evaluated at each target AP time. 
+    //
+
+    err = 0
+    for i = 0, modFit.size-1 {
+	if( EFUN_DBG ) {
+	    printf("Err was %f; Add SQR( E %f - M %f)\n",err,datFit.x[i],modFit.x[i])
+	    dbgfile.printf("str2(%d) = {'Exp AP %d, error %f'};\n",nstr2,i,SQR(datFit.x[i]-modFit.x[i]))
+	    nstr2 += 1
+	}
+	err += SQR(datFit.x[i]-modFit.x[i])
+    }
+    if( modFit.size > 0 ) {
+	err = sqrt( err / modFit.size )
+    }
+//printf("Total Fit error = %g\n",err)
+
+    //
+    //	Scale the error further as an extra penalty for models which do not
+    //  fire.  The scaling factor is defined by the user in scale_factors() below.
+    //  This extra penalty is only applied when the target does exhibit APs.
+    //
+    if( pen_silent && (mmxind-mmnind < 2) ) {
+	err *= nf_frscale
+	sprint(ntag,"(silent - extra scaled by %f)",nf_frscale)
+    }
+
+    if( EFUN_DBG ) {
+	dbgfile.printf("str2(%d) = {'Total linear fit error = %.2f * %.2f %s'};\n\n",nstr2,err,tot_frscale,ntag)
+	print "Total linear fit error = ",err," * ",tot_frscale, ntag
+	nstr2 += 1
+    }
+
+
+    return err
+}
+
+
+proc save_context() { local i
+	$o1.pack(ntag, FCNTYP, shape_scale, \
+		 frscale, cvscale, frm_fac, frs_fac, cvm_fac, cvs_fac, \
+		 brst_thold, brst_pnlty, delay_pnlty, frcv_int, ydat, \
+		 ydat.label, xdat, boundary)
+	$o1.pack(boundary)
+	$o1.pack(apwin)
+	$o1.pack(apsubwin)
+}
+
+proc restore_context() { local i
+	$o1.unpack(ntag,	&FCNTYP, &shape_scale, &subshape_scale,\
+		   &frscale,&cvscale,&frm_fac,&frs_fac,&cvm_fac,&cvs_fac,\
+		   &brst_thold,&brst_pnlty,&delay_pnlty,&frcv_int,ydat)
+	$o1.unpack(tstr, xdat)
+	ydat.label(tstr)
+	set_data(xdat, ydat)
+	$o1.unpack(boundary)
+	$o1.unpack(apwin)
+	$o1.unpack(apsubwin)
+	set_allxy()
+}
+
+proc init() {local i
+
+        print "initializing AP_instFR_Fitness, last modified 11 Sep 07"
+	EFUN_DBG = 0
+	VERBOSE = 0
+	GBAR_SMRY = 0
+	TIME_DBG = 0
+	//ftime = new File()
+	//ftime.wopen("timing.txt")
+
+	sprint(tag, "%s", this)
+	sscanf(tag, "%[^[]", tag)
+	use_x = 0
+	use_gui = 0
+	have_data = 0
+	//mintstop_ = 0
+	xdat = new Vector(0)
+	ydat = new Vector(0)
+	idx_rel_list  = new List()
+	xdat_rel_list = new List()
+	ydat_rel_list = new List()
+	boundary = new Vector(2)
+
+
+	FCNTYP = 0
+	apwin = new Vector(2)
+	apwin.x[0] = apwin.x[1] = 0
+	
+	useAP = new Vector(0)
+	match_all = 1
+
+	outname = "err_data"
+
+	xyAPtimes = new Vector(0)
+	xpeak = 0
+	setmode(0)
+	t_hat = 10
+	pow1 = 0.4
+	pow2 = 1
+	frscale=1
+	cvscale=1
+	time_scale = miss_scale = 0.1
+	shape_scale = 5
+	frm_fac = 10
+	frs_fac = 5
+	cvm_fac = 100
+	cvs_fac = 1
+	frcv_int = 1000
+	sprint(scalelabel, "scale shape=%g FR=%g CV=%g",\
+			   shape_scale,frscale,cvscale)
+
+	brst_pnlty = brst_thold = 0
+	delay_pnlty = 1
+
+	if (have_data) {
+		boundary.x[0] = xdat.x[0]
+		boundary.x[1] = xdat.x[xdat.size-1]
+	} else {
+	    boundary.x[0] = boundary.x[1] = 0
+	}
+
+    // these are to measure AHP
+    MS_AHP = 0
+    neg_p  = 0
+    trgh_sz = 0
+    trgh_ps = 0
+    thr_ac = 0
+
+//print "\tdone initializing AP_instFR_Fitness"
+}
+
+proc clone() {
+	$o1 = new AP_instFR_Fitness()
+	$o1.have_data = have_data
+	if (have_data) {
+		$o1.set_data(xdat, ydat)
+	}
+	$o1.boundary = boundary.c
+	$o1.apwin    = apwin.c
+	$o1.xyAPtimes = xyAPtimes.c
+	$o1.set_modelx(idx_rel_list)
+	$o1.t_hat = t_hat
+	$o1.pow1 = pow1
+	$o1.pow2 = pow2
+	$o1.FCNTYP = FCNTYP
+	$o1.shape_scale = shape_scale
+	$o1.frscale = frscale
+	$o1.cvscale = cvscale
+	$o1.frm_fac = frm_fac
+	$o1.frs_fac = frs_fac
+	$o1.cvm_fac = cvm_fac
+	$o1.cvs_fac = cvs_fac
+	$o1.brst_thold  = brst_thold
+	$o1.brst_pnlty  = brst_pnlty
+	$o1.delay_pnlty = delay_pnlty
+	sprint(scalelabel, "scale shape=%g FR=%g CV=%g",\
+			   shape_scale,frscale,cvscale)
+}
+
+proc redraw() { local i, xpsn
+    if (use_gui) {
+	g.erase()
+	if (have_data) {
+		g.label(.8, .95)
+		ydat.plot(g, xdat, 2, 1)
+		if( ydat_rel_list.count > 0 && n_expAP > 0 ) {
+		    xpsn = \
+		      xdat.x[ydat.nextpeak(xyAPtimes.x[exp_APleft])]
+		    ydat_rel_list.object(0).mark(g,\
+		        xdat_rel_list.object(0).c.add(xpsn),"+",6, 3, 1)
+		}
+		for i=0, boundary.size() - 1 {
+			g.beginline(3, 1)
+			g.line(boundary.x[i], g.size(3))
+			g.line(boundary.x[i], g.size(4))
+		}
+
+		if( !match_all ) {
+		    for i = 0, useAP.size-1 {
+		        if( useAP.x[i] && i >= exp_APleft && i <= exp_APright ) {
+	                    g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[i])],ydat.x[ydat.nextpeak(xyAPtimes.x[i])]+10,"T",10,1,1)
+		        } else {
+	                    g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[i])],ydat.x[ydat.nextpeak(xyAPtimes.x[i])]+10,"T",10,0,1)
+			}
+		    }
+		}
+	}
+	if (numarg() == 2) {
+		$o2.line(g, $o1)
+	}
+	g.flush()
+    }
+
+}
+
+proc set_data() {local i
+	have_data = 0
+	i = $o1.indwhere(">=", 0)
+	if (i < 0 || $o1.size < 1) return
+	// copy $o1 into xdat without label;
+	// copy $o2 into ydat with its label string
+	xdat = $o1.c(i)
+	ydat = $o2.cl(i)
+	boundary.x[0] = xdat.x[0]
+	boundary.x[1] = xdat.x[xdat.size-1]
+	have_data = 1
+	xpeak = xdat.x[ydat.max_ind]
+	if (use_gui) {
+		g.size(xdat.min(), xdat.max(), ydat.min(), ydat.max())
+		redraw()
+	}
+}
+proc set_modelx() {local i
+        objref idx_rel_list
+	idx_rel_list = new List()
+
+        for i = exp_APleft, exp_APright {
+	    idx_rel_list.append($o1.object(i))
+	}
+	set_allxy()
+}
+
+func mintstop() {
+	return boundary.x[1]
+}
+
+proc setxy() {local i, ap_ind, glob_ind
+     // $1 index of AP in the master list
+     // $2 index of AP, within the boundary.
+
+        if( PASTE_DBG ) {
+    print "SETXY START:"
+	    for i = 0, ydat_rel_list.count-1 {
+		    print "\ty[",i,"] peak ",ydat_rel_list.object(i).x[ydat_rel_list.object(i).firstpeak]
+	    }
+	    dbgfile = new File()
+	    dbgfile.aopen("paste_curve.m")
+	    dbgfile.printf("%% in setxy() \n")
+        }
+	mintstop_ = 0
+	glob_ind  = $1
+	ap_ind    = $2
+
+	if( PASTE_DBG ) { printf("SETXY:  appending AP %d global %d\n",ap_ind,glob_ind) }
+
+	xpeak = xdat.x[ydat.nextpeak(xyAPtimes.x[glob_ind])]
+
+	if( PASTE_DBG ) {
+	    print "\t",ap_ind,".\tIn setxy, index size ",idx_rel_list.object(ap_ind).size
+	    dbgfile.printf("idx(:,%d) = [",ap_ind+1)
+	    idx_rel_list.object(ap_ind).printf(dbgfile)
+	    print "xdat size ",xdat.size
+	    dbgfile.printf("];\n")
+	}
+	
+	xtmp.index(xdat, idx_rel_list.object(ap_ind))
+	xtmp.sub(xpeak)
+	xdat_rel_list.append(xtmp.c)
+
+	if( PASTE_DBG ) {
+	    print "xdat size ",xdat_rel_list.object(ap_ind).size
+	    dbgfile.printf("%% xdat_rel\nxdat_rel_sub(:,%d) = [",ap_ind+1)
+	    xdat_rel_list.object(ap_ind).printf(dbgfile)
+	    dbgfile.printf("];\n")
+	}
+
+	ytmp.index(ydat, idx_rel_list.object(ap_ind))
+	ydat_rel_list.append(ytmp.c)
+
+	if( PASTE_DBG ) {
+	    print "ydat size ",ydat_rel_list.object(ap_ind).size
+	    dbgfile.printf("%% ydat_rel\nydat_rel_set(:,%d) = [",ap_ind+1)
+	    ydat_rel_list.object(ap_ind).printf(dbgfile)
+	    dbgfile.printf("];\n")
+	}
+
+	if ( xtmp.x[xtmp.size-1] < boundary.x[1] && \
+	    mintstop_ < xtmp.x[xtmp.size-1]) {
+		mintstop_ = xtmp.x[xtmp.size-1]
+	}
+
+	if( ap_ind == 0 ) { redraw() }
+
+        if( PASTE_DBG ) {
+	    dbgfile.printf("mintstop = %g;\n",mintstop_)
+	    dbgfile.close()
+    print "SETXY END:"
+	    for i = 0, ydat_rel_list.count-1 {
+		    print "\ty[",i,"] peak ",ydat_rel_list.object(i).x[ydat_rel_list.object(i).firstpeak]
+	    }
+	}
+}
+
+proc set_allxy() { local iloop
+     //print "Here in set_allxy()"
+     left_ptr = new Pointer(&exp_APleft)
+     right_ptr = new Pointer(&exp_APright)
+     n_ptr = new Pointer(&n_expAP)
+     nw_ptr = new Pointer(&n_expWin)
+     find_APtimes(xdat,ydat,xyAPtimes,"Exp AP",1,left_ptr,right_ptr,n_ptr,nw_ptr) 
+
+     if( !have_data ) {
+         printf("set_allxy(): defined useAP of size %d\n",xyAPtimes.size)
+         useAP = new Vector(xyAPtimes.size,0)
+     }
+
+     set_relative_idx()
+
+     for iloop = exp_APleft, exp_APright {
+	 //print "\t",iloop,". setting xy"
+         setxy(iloop,iloop-exp_APleft)
+     }
+     //print "end of set_allxy(), mintstop = ",mintstop_
+}
+	
+proc clipboard_data() {
+	sprint(tstr, "%s.set_data(hoc_obj_[1], hoc_obj_[0])", this)
+	if(execute1(tstr) == 0) {
+continue_dialog("No data in the Vector clipboard. Select a Graph line first")
+	}
+
+	set_allxy()
+
+	/****
+	clipboard_get(xtmp,ytmp)
+
+	// find AP times, and define useAP vector
+	left_ptr = new Pointer(&exp_APleft)
+	right_ptr = new Pointer(&exp_APright)
+	n_ptr = new Pointer(&n_expAP)
+	nw_ptr = new Pointer(&n_expWin)
+	find_APtimes(xtmp,ytmp,xyAPtimes,"Exp AP",1,left_ptr,right_ptr,n_ptr,nw_ptr) 
+        printf("clipboard_data(): defined useAP of size %d\n",xyAPtimes.size)
+	useAP = new Vector(xyAPtimes.size,0)
+	****/
+}
+
+proc build() {
+	if (use_gui) return
+	use_gui = 1
+	vbox = new VBox(3)
+	vbox.ref(this)
+	sprint(tstr, "execute(\"%s.unmap()\")", this)
+	vbox.dismiss_action(tstr)
+	vbox.save("save()")
+	vbox.intercept(1)
+	g = new Graph(0)
+	xpanel("", 1)
+	g.menu_tool("Adjust", "adjust_region")
+	setmode(0)
+	xmenu("Select")
+		xbutton("Data from Clipboard", "clipboard_data()")
+		xbutton("Set AP window and factor", "set_apwin()")
+		xcheckbox("Match all APs",&match_all,"match_allAP()")
+		xbutton("Set scale factors", "scale_factors()")
+		xbutton("Set class of functions for FR fit","choose_function_panel()")
+		xbutton("Region panel", "region_panel()")
+		//xbutton("FR weight factors", "scalefr()")
+		//xbutton("CV weight factors", "scalecv()")
+		//xbutton("Set FR & CV interval size", "set_frcv_intvl()")
+		xbutton("Set burst penalty","set_burstpen()")
+		xbutton("Set firing delay penalty","set_delaypen()")
+		xbutton("Set output info", "output_panel()")
+		g.menu_tool("Select APs to match","choose_matchAP")
+	xmenu()
+	xvarlabel(modelabel)
+	xvarlabel(scalelabel)
+	mserrlabel="MeanSqErr xxxxxxxxxxx"
+	xvarlabel(mserrlabel)
+	xpanel()
+	g.view(0, -80, 5, 40, 0,300,0,200)
+	if (have_data) {
+		g.size(xdat.min(), xdat.max(), ydat.min(), ydat.max())
+		redraw()
+	}
+	vbox.intercept(0)
+
+}
+
+proc match_allAP() { local apind
+
+    if( useAP.size == 0 ) { useAP.resize(xyAPtimes.size) }
+
+    for apind = 0, xyAPtimes.size-1 {
+
+	g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[apind])],ydat.x[ydat.nextpeak(xyAPtimes.x[apind])]+10,"T",10,0,1)
+	if( !match_all && useAP.x[apind] && \
+	    apind >= exp_APleft && apind <= exp_APright) {
+	    g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[apind])],ydat.x[ydat.nextpeak(xyAPtimes.x[apind])]+10,"T",10,1,1)
+	}
+    }
+
+}
+
+proc choose_matchAP() { local apind
+     // $1  type of mouse event  (1=drag, 2=press, 3=release)
+     // $2  x coord of mouse event
+     // $3  y coord of mouse event
+     // $4  keystate (0=none, 1=ctrl, 2=shft, 3=meta)
+
+    if( match_all ) return
+
+    if( $1 == 3 ) {
+
+	apind = xdat.ind(xyAPtimes).c.sub($2).abs.min_ind
+
+	if( useAP.x[apind] ) { 
+	    useAP.x[apind] = 0 
+	    printf("AP shape %d at time %g WILL NOT be matched.\n",apind,xdat.x[xyAPtimes.x[apind]])
+
+	    g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[apind])],ydat.x[ydat.nextpeak(xyAPtimes.x[apind])]+10,"T",10,0,1)
+	} else { 
+	    useAP.x[apind] = 1
+	    printf("AP shape %d at time %g WILL be matched.\n",apind,xdat.x[xyAPtimes.x[apind]])
+
+	    g.mark(xdat.x[ydat.nextpeak(xyAPtimes.x[apind])],ydat.x[ydat.nextpeak(xyAPtimes.x[apind])]+10,"T",10,1,1)
+	}
+    }
+}
+
+proc factors() {local th, pw, pw2
+        th = t_hat
+	pw = pow1
+	pw2 = pow2
+	sprint(tmpstr, "%g %g %g", t_hat,pow1,pow2)
+	while (1) {
+if (string_dialog("Enter space separated t_hat, pow1, pow2 parameters",tmpstr)){
+			if (sscanf(tmpstr, "%g %g %g", &t_hat, &pow1, &pow2) == 3) {
+//sprint(scalelabel, "t_hat=%g pow1=%g pow2=%g", t_hat,pow1,pow2)
+				return
+			}
+		}else{
+			break
+		}
+	}
+	t_hat = th
+	pow1  = pw
+	pow2 = pw2
+}
+
+
+
+proc lin_scale_factors() {local sls, ics, slp
+	sls  = tot_frscale
+	ics  = nf_frscale
+        slp  = slope_scale
+	sprint(tmpstr, "%g %g %g", sls,ics,slp)
+	while (1) {
+if (string_dialog("Enter space separated (1) total weight (2) extra non-firing and (3) slope scale factor",tmpstr)){
+			if (sscanf(tmpstr, "%g %g %g", &tot_frscale, &nf_frscale, &slope_scale) == 3) {
+	sprint(scalelabel, "weight=%g silent weight=%g",\
+			   tot_frscale,nf_frscale)
+				return
+			}
+		}else{
+			break
+		}
+	}
+	tot_frscale = sls
+	nf_frscale  = ics
+        slope_scale = slp
+}
+
+
+proc exp_scale_factors() {local sls, ics
+	sls = slope_scale
+	ics  = intcp_scale
+	sprint(tmpstr, "%g %g", sls,ics)
+	while (1) {
+if (string_dialog("Enter space separated rate_scale and	peak_scale parameters",tmpstr)){
+			if (sscanf(tmpstr, "%g %g", &slope_scale, &intcp_scale) == 2) {
+	sprint(scalelabel, "scale rate=%g peak=%g",\
+			   slope_scale,intcp_scale)
+				return
+			}
+		}else{
+			break
+		}
+	}
+	slope_scale = sls
+	intcp_scale = ics
+}
+
+
+proc sine_scale_factors() {local sls, ics
+
+     //
+     // to avoid defining new variables for "amplitude" and "phase"
+     // rather than "slope" and "intercept",
+     // let slope_scale = intended amplitude scale factor, and
+     //     intcp_scale = intended phase scale factor
+     //
+
+	sls = slope_scale
+	ics  = intcp_scale
+	sprint(tmpstr, "%g %g", sls,ics)
+	while (1) {
+if (string_dialog("Enter space separated amp_scale and phase_scale parameters",tmpstr)){
+			if (sscanf(tmpstr, "%g %g", &slope_scale, &intcp_scale) == 2) {
+	sprint(scalelabel, "scale amp=%g phase=%g",\
+			   slope_scale,intcp_scale)
+				return
+			}
+		}else{
+			break
+		}
+	}
+	slope_scale = sls
+	intcp_scale = ics
+}
+
+proc scale_factors() {local shs, bs
+     if( FCNTYP == 0 ) { lin_scale_factors()  }
+     if( FCNTYP == 1 ) { exp_scale_factors()  }
+     if( FCNTYP == 2 ) { sine_scale_factors() }
+}
+
+proc scalefr() {local fr, frm, frs
+	fr = frscale
+	frm = frm_fac
+	frs = frs_fac
+
+	sprint(tmpstr, "%g %g %g", frscale, frm_fac, frs_fac)
+	while (1) {
+if (string_dialog("Enter space separated FR error, mean, std dev factors",tmpstr)){
+			if (sscanf(tmpstr, "%g %g %g", &frscale, &frm_fac, &frs_fac) == 3) {
+				return
+			}
+		}else{
+			break
+		}
+	}
+	frscale = fr
+	frm_fac = frm
+	frs_fac = frs
+}
+
+
+proc scalecv() {local cv, cvm, cvs
+	cv = cvscale
+	cvm = cvm_fac
+	cvs = cvs_fac
+
+	sprint(tmpstr, "%g %g %g", cvscale, cvm_fac, cvs_fac)
+	while (1) {
+if (string_dialog("Enter space separated CV error, mean, std dev factors",tmpstr)){
+			if (sscanf(tmpstr, "%g %g %g", &cvscale, &cvm_fac, &cvs_fac) == 3) {
+				return
+			}
+		}else{
+			break
+		}
+	}
+	cvscale = cv
+	cvm_fac = cvm
+	cvs_fac = cvs
+}
+
+proc set_frcv_intvl() { local ivl
+    
+    ivl = frcv_int
+
+    sprint(tmpstr, "%g",frcv_int)
+    while (1) {
+        if( string_dialog("Enter length of intervals for FR, CV calculations",tmpstr)){
+	    if (sscanf(tmpstr, "%g", &frcv_int) == 1) {
+		return
+	    }
+	} else {
+	    break
+	}
+    }
+
+    frcv_int = ivl
+
+}
+
+proc set_burstpen() {local th, pw
+
+     sprint(tmpname,"For each ISI < BURST_THOLD (ms), add BURST_PENALTY.\nEnter space separated BURST_THOLD and BURST_PENALTY parameters")
+        
+        th = brst_thold
+	pw = brst_pnlty
+	sprint(tmpstr, "%g %g", brst_thold,brst_pnlty)
+	while (1) {
+if (string_dialog(tmpname,tmpstr)){
+			if (sscanf(tmpstr, "%g %g", &brst_thold, &brst_pnlty) == 2) {
+				return
+			}
+		}else{
+			break
+		}
+	}
+	brst_thold = th
+	brst_pnlty = pw
+}
+
+proc set_delaypen() { local pn
+
+    sprint(tmpname,"Enter scale factor for First Spike Delay Penalty")
+ 
+    pn = delay_pnlty        
+
+    sprint(tmpstr, "%g", delay_pnlty)
+    while (1) {
+        if (string_dialog(tmpname,tmpstr)){
+	    if (sscanf(tmpstr, "%g", &delay_pnlty) == 1) {
+		return
+	    }
+	} else {
+	    break
+	}
+    }
+    delay_pnlty = pn
+}
+
+proc setmode() {
+	mode = $1
+	sprint(modelabel, "     ")
+}
+
+
+proc map() {
+	if (!use_gui) build()
+	if (numarg() > 1) {
+		vbox.map($s1, $2, $3, $4, $5)
+	}else if (numarg() == 1){
+		vbox.map($s1)
+	}else{
+		vbox.map()
+	}
+}
+
+proc unmap() {
+}
+
+proc save() {local i, j
+	vbox.save("load_file(\"e_apshp_frfit.hoc\", \"AP_instFR_Fitness\")}\n{")
+		vbox.save("ocbox_=new AP_instFR_Fitness(1)")
+        vbox.save("}\n{object_push(ocbox_)}\n{build()")
+	if (object_id(xdat)) {
+		sprint(tstr, "xdat = new Vector(%d)", xdat.size)
+		vbox.save(tstr)
+		sprint(tstr, "ydat = new Vector(%d)", ydat.size)
+		vbox.save(tstr)
+		sprint(tstr, "ydat.label(\"%s\")", ydat.label)
+		vbox.save(tstr)
+sprint(tstr, "for i=0,%d { xdat.x[i]=fscan() ydat.x[i]=fscan()}}",\
+xdat.size - 1)
+		vbox.save(tstr)
+		for i=0,xdat.size-1 {
+			sprint(tstr, "%g %g", xdat.x[i], ydat.x[i])
+			vbox.save(tstr)
+		}
+		vbox.save("{set_data(xdat, ydat)}")
+
+		vbox.save("objref tmpvec")
+		for j = exp_APleft, exp_APright {
+	            if (idx_rel_list.object(j).size > 0) {
+		        sprint(tstr, "tmpvec = new Vector(%d)", j,idx_rel_list.object(j).size)
+			vbox.save(tstr)
+			sprint(tstr, "for i=0,%d { tmpvec.x[i]=fscan()}", idx_rel_list.object(j).size - 1,j)
+			vbox.save(tstr)
+			for i=0,idx_rel_list.object(j).size-1 {
+			    sprint(tstr, "%g", idx_rel_list.object(j).x[i])
+			    vbox.save(tstr)
+			}
+			vbox.save("idx_rel_list.append(tmpvec)")
+		    }
+		}
+		vbox.save("{set_allxy()}")
+	}else{
+		vbox.save("}")
+	}
+        vbox.save("{object_pop()}\n{")
+	g.save_name("ocbox_.g", 1)
+}
+
+func pick_x() {local i
+
+	// NOTE 'indwhere' (or even manual search above) 
+	// does NOT always find the correct index!
+	// often returns the first index greater than the sought value,
+	// even if there is an element that is exactly equal to the sought value.
+	i = xdat.indwhere(">=", $1)
+	if (i == -1) i = 0
+	return i
+}
+
+proc wfile() { local chooseAP
+
+        if( match_all ) chooseAP = 0 else chooseAP = 1
+	//printf("chooseAP = %d, add %d lines\n",chooseAP,chooseAP*useAP.size+2)
+
+        // Whenever adding more data, be sure to update the line count here!
+	// add 2 lines (to report vector size, plus one more), + vector size
+	// extra 6 lines are for boundary, ap window, ap subwindow
+	// extra lines for which APs will be used.
+	$o1.printf("AP_instFR_Fitness xdat ydat boundary apwin (lines=%d) ",\
+		4 + 2*xdat.size + 2 + chooseAP*useAP.size+2 )
+	$o1.printf(" %g %g %g %g %g %g %g %g %g\n",\
+		   FCNTYP, shape_scale,tot_frscale, nf_frscale, slope_scale,\
+		   brst_thold, brst_pnlty, delay_pnlty, match_all)
+	$o1.printf("|%s|\n", ydat.label)
+	$o1.printf("%d\n", xdat.size)
+	xdat.printf($o1)
+	ydat.printf($o1)
+
+	$o1.printf("2\n%g\n%g\n", boundary.x[0],boundary.x[1])
+	$o1.printf("%d\n", apwin.size)
+	apwin.printf($o1)
+
+	if( chooseAP ) {
+	    $o1.printf("%d\n",useAP.size)
+	    useAP.printf($o1)
+printf("printing useAP to a file : ")
+useAP.printf()
+	}
+
+}
+
+proc rfile() {local i, n
+	FCNTYP      = $o1.scanvar
+	shape_scale = $o1.scanvar
+	tot_frscale = $o1.scanvar
+	nf_frscale  = $o1.scanvar
+	slope_scale = $o1.scanvar
+	brst_thold  = $o1.scanvar
+	brst_pnlty  = $o1.scanvar
+	delay_pnlty = $o1.scanvar
+	match_all   = $o1.scanvar
+	sprint(scalelabel, "shape=%g",shape_scale)
+	$o1.gets(tstr)
+	if (sscanf(tstr, "|%[^|]", tstr) == 1) {
+		ydat.label(tstr)
+	}
+	n = $o1.scanvar
+	if (n > 0) {
+		xdat.resize(n) ydat.resize(n)
+		xdat.scanf($o1, n)
+		ydat.scanf($o1, n)
+		set_data(xdat, ydat)
+	}
+
+	n = $o1.scanvar
+	boundary.resize(n)
+	boundary.scanf($o1, n)
+
+	n = $o1.scanvar
+	apwin.resize(n)
+	apwin.scanf($o1, n)
+//print "apwin = ",apwin.x[0],apwin.x[1]
+
+	if( !match_all ) {
+	    n = $o1.scanvar
+	    printf("resizing useAP to %d elements\n",n)
+	    useAP.resize(n)
+	    useAP.scanf($o1,n)
+	}
+
+//print "here in rfile()"
+	set_relative_idx()
+	set_allxy()
+//print "rfile done set_allxy() "
+}
+
+/****************************************************
+	Count APs which occur during the specified time boundary. 
+****************************************************/
+proc find_APtimes() { local i, firing, thresh, idx
+	// $o1 x component, $o2 y component of a voltage trace
+	// $o3 stores AP times
+	// $s4 stores descriptive string
+	// $5  1 or 0, print result to screen?
+	// $o6, points to AP after left boundary
+	// $o7, points to AP before right boundary
+	// $o8, points to count of APs within boundary
+	// $o9, pointer to the number of AP shape windows within 
+	//      boundary (which may differ from the number of APs)
+
+        thresh = -20
+
+        $o3 = new Vector()
+	firing = 0
+	check($o1,$o2,$o3,0,thresh,firing)
+	for i = 0, $o1.size-1 {
+	    firing = check($o1,$o2,$o3,i,thresh,firing)
+	}
+
+	/***
+        if( $5 ) {
+	    print $s4, "Found ",$o3.size," APs:"
+	    for i = 0, $o3.size-1 {
+	        printf("%g.\t(x,y)[%d] = (%g,%g)\n",i,$o3.x[i],$o1.x[$o3.x[i]],$o2.x[$o3.x[i]])
+	    }
+        }
+	***/
+	// find first AP after, and last AP before, the time bounds
+	$o6.val = $o1.ind($o3).indwhere(">=", boundary.x[0])
+	// probably, keep left boundary less than zero.
+	// if( $o6.val < 0 ) $o6.val = $o3.size
+	$o7.val = $o1.ind($o3).indwhere(">", boundary.x[1]) - 1
+	if( $o7.val < 0 ) $o7.val = $o3.size-1
+
+	$o8.val = $o7.val-$o6.val+1
+	if( $o7.val < 0 || $o6.val < 0 ) {
+ 	    $o8.val = 0
+	}
+
+        // if the AP window begins AFTER the AP peak, it is possible 
+	// that the last AP will have no window associated with it.
+        if( ($o7.val >= 0) && ($o3.size > 0)) {
+            if ($o1.x[$o3.x[$o7.val]]+apwin.x[0] < boundary.x[1]) {
+	        $o9.val = $o8.val
+            } else { $o9.val = $o8.val - 1 }
+        } else $o9.val = 0
+
+	if( VERBOSE ) {
+	    printf("left = %g, right = %g, count = %g\n",$o6.val,$o7.val,$o8.val)
+	    if( $o6.val > 0 ) {
+		printf("first %s after  bound %g has time %g\n",$s4,boundary.x[0],$o1.x[$o3.x[$o6.val]])
+	    }
+	    if( $o7.val > 0 ) {
+		printf("last  %s before bound %g has time %g\n",$s4,boundary.x[1],$o1.x[$o3.x[$o7.val]])
+	    }
+	    printf("Total valid APs %d\n",$o8.val)
+	    printf("Total valid AP windows %d\n",$o9.val)
+	}
+	    //printf("Total valid APs %d\n",$o8.val)
+	    //printf("Total valid AP windows %d\n",$o9.val)
+
+}
+
+func check() { local idx, thresh, firing, time
+	// $o1 x component, $o2 y component of a voltage trace
+	// $o3 stores AP times
+
+       idx = $4
+       thresh = $5
+       firing = $6
+       /** if( $o1.x[idx] >= boundary.x[0] && $o1.x[idx] <= boundary.x[1] &&
+       $o2.x[idx] >= thresh && !firing ) { **/
+       if( $o2.x[idx] >= thresh && !firing ) { 
+           firing = 1
+	   time = $o1.x[idx]
+	   $o3.append(idx)
+       }
+       if(firing && $o2.x[idx] < thresh && $o1.x[idx] > time) { firing = 0 }
+       return firing
+}
+
+
+/*******************************************************************************
+
+    Find the mean & variance of FR.  Report (mean) CV.  For multiple model
+    runs, also report the variance of the CV.
+
+    The user has specified an interval, frcv_int, over which the mean and 
+    std values of FR and CV will be calculated. For each non-overlapping 
+    interval of this length contained within the matching bounds, values 
+    of FR and CV will be calculated.
+
+*******************************************************************************/
+proc findFR() { local i, nint, cvmean
+    // $o1  AP times
+    // $o2  instantaneous FRs
+    // $o3  mean FR vector
+    // $o4  stdv FR vector
+    // $o5  mean CV vector
+    // $o6  stdv CV vector
+
+//// CHECK THIS FOR BUGS!  JAN 05 05
+
+    $o2 = new Vector()
+
+    // vector $o1 has all of the APtimes throughout the simulation;
+    // calculate associated firing rates.
+    frwhere = $o1.indwhere(">=",boundary.x[1])
+    if( frwhere == -1 ) frwhere = $o1.size
+    if( EFUN_DBG && VERBOSE ) dbgfile.printf("%% last index should be %d\n",frwhere)
+    //for i = 0, $o1.size-2 {
+    for i = 0, frwhere-2 {
+	$o2.append(1000/($o1.x[i+1]-$o1.x[i]))
+    }
+
+    // how many intervals will be calculated?
+    // 
+    // if match region is less than specified interval, use the entire match
+    // region to calculate FR & CV
+    //
+    nint = int( (boundary.x[1]-boundary.x[0]) / frcv_int )
+    if( nint <= 0 ) { nint = 1 }
+
+    if( EFUN_DBG && VERBOSE ) {
+        dbgfile.printf("\n%% Looking at APs: ")
+	$o1.printf(dbgfile,"%g\t")
+	dbgfile.printf("%% FRs are : ")
+	$o2.printf(dbgfile,"%g\t")
+    }
+
+    // frindx stores the indices of the start/endpoints of each interval.
+    // not needed outside this procedure.
+    frindx = new Vector()
+    for( i = boundary.x[0]; i <= boundary.x[1]; i += frcv_int ) {
+        frwhere = $o1.indwhere(">=",i)
+	if( VERBOSE ) { 
+	    dbgfile.printf("%% %s > %g at index %d\n",$o1,i,frwhere)
+	}
+	if( frwhere == -1 || frwhere > $o2.size-1 ) {
+	    // all firing occurs before this time boundary; the last FR
+	    // value is the appropriate index.
+	    frindx.append($o2.size)
+	} else { 
+	    frindx.append(frwhere) 
+	}
+    }
+    for i = frindx.size, nint+1 {
+        frindx.append($o2.size)
+    }
+    if( EFUN_DBG && VERBOSE ) { 
+        dbgfile.printf("%% interval bound indices are : ")
+	frindx.printf(dbgfile,"%g\t")
+    }
+
+    if( $o2.size == 0 ) { 
+        $o3.val = $o4.val = $o5.val = $o6.val = 0
+        return
+    }
+
+    frtmp   = new Vector(nint)
+    frtmpsd = new Vector(nint)
+    cvtmp   = new Vector(nint)
+    for i = 0, nint-1 {
+        if( frindx.x[i] == frindx.x[i+1] ) {
+	    frtmp.x[i] = 0
+	} else {
+	    if( (frindx.x[i+1] - frindx.x[i]) < 2 ) { 
+		// BUG! found 15 mar
+		// frtmp.x[i] = $o2.x[i]
+	        frtmp.x[i] = $o2.x[frindx.x[i]]
+	    } else {
+                frtmp.x[i] = $o2.mean(frindx.x[i],frindx.x[i+1]-1)
+	    }
+	}
+        if( (frindx.x[i+1] - frindx.x[i]) < 2 ) {
+	    frtmpsd.x[i] = 0
+	    cvtmp.x[i]   = 0
+	} else {
+	    frtmpsd.x[i] = $o2.stdev(frindx.x[i],frindx.x[i+1]-1)
+	    cvtmp.x[i]   = frtmpsd.x[i] / frtmp.x[i]
+	}
+	if( EFUN_DBG && VERBOSE ) {
+	    dbgfile.printf("%% Interval %d firing rates: ",i)
+	    if( frindx.x[i]==frindx.x[i+1] ) {
+	        dbgfile.printf("None here.\n")
+	    } else { $o2.printf(dbgfile,"%g\t",frindx.x[i],frindx.x[i+1]-1) }
+	    dbgfile.printf("%% Mean FR = %g, FR SD = %g, CV = %g\n",frtmp.x[i],frtmpsd.x[i],cvtmp.x[i])
+	}
+    }
+
+    $o3.val = frtmp.mean
+    $o4.val = frtmpsd.mean
+    $o5.val = cvtmp.mean
+    if( cvtmp.size < 2 ) {
+        $o6.val = 0
+    } else {
+        $o6.val = cvtmp.stdev
+    }
+
+    if( EFUN_DBG && VERBOSE ) {
+        dbgfile.printf("%% CV info: ")
+        cvtmp.printf(dbgfile,"%g\t")
+        dbgfile.printf("%% CV mean = %g, CV std = %g\n\n",$o5.val,$o6.val)
+    }
+
+}
+
+
+proc region_panel() {
+	xpanel("Region boundaries")
+	xpvalue("interval startpoint", &boundary.x[0], 1, "set_r()")
+	xpvalue("interval endpoint", &boundary.x[1], 1, "set_r()")
+
+	xpanel()
+
+}
+
+proc output_panel() {
+	xpanel("Output info")
+	xcheckbox("Write M-file", &EFUN_DBG)
+	xcheckbox("Write verbose M-file", &VERBOSE)
+	xcheckbox("Write conductance summary (Av-Ron model only)", &GBAR_SMRY)
+	//xcheckbox("Write M-file", &EFUN_DBG, "EFUN_DBG = !EFUN_DBG")
+	//xcheckbox("Write verbose M-file", &VERBOSE, "{ VERBOSE = !VERBOSE EFUN_DBG = 1}")
+	xbutton("Set output filename","get_outname(outname)")
+
+	if( VERBOSE ) { EFUN_DBG = 1 }
+	if( !ismembrane("fn") ) { GBAR_SMRY = 0 }
+
+	xpanel()
+
+}
+
+
+proc choose_function_panel() {
+	xpanel("Choose function type")
+
+	xradiobutton("Linear","FCNTYP = 0",FCNTYP==0)
+	xradiobutton("Exponential","FCNTYP = 1",FCNTYP==1)
+	xradiobutton("Sinusoid","FCNTYP = 2",FCNTYP==2)
+
+	xpanel()
+
+}
+
+proc set_r() {local i, t, tmin, tmax, n
+    if (have_data){
+	// make sure regions are within data boundaries
+	tmin = xdat.x[0]
+	tmax = xdat.x[xdat.size - 1]
+	n = boundary.size()
+	for i=0, n-1 {
+		t = boundary.x[i]
+		if (t < tmin) {
+			boundary.x[i] = tmin
+		}
+		if (t > tmax) {
+			boundary.x[i] = tmax
+		}
+	}
+
+    }
+
+    set_allxy()
+
+    redraw()
+}
+
+proc ask_apwin() { local ws, we, w_scl
+        ws = apwin.x[0]
+        we = apwin.x[1]
+	w_scl = shape_scale
+	sprint(tmpstr, "%g %g %g", ws,we,w_scl)
+	while (1) {
+if (string_dialog("Enter space separated window times, relative to AP peak, and shape weight factor",tmpstr)){
+			if (sscanf(tmpstr, "%g %g %g", &apwin.x[0], &apwin.x[1], &shape_scale) == 3) {
+				return
+			}
+		}else{
+			break
+		}
+	}
+}
+
+proc set_apwin() { 
+
+        ask_apwin()
+	set_relative_idx()
+	set_allxy()
+
+	if( mintstop_ < boundary.x[1] ) { mintstop_ = boundary.x[1] }
+	//print "Set AP window to [",apwin.x[0],",",apwin.x[1],"] -- check [",xtmp.min,",",xtmp.max,"]"
+	//print "mintstop = ",mintstop_
+}
+
+proc set_apwin_noGUI() {
+     apwin.x[0] = $1
+     apwin.x[1] = $2
+
+     set_relative_idx()
+     set_allxy()
+     if( mintstop_ < boundary.x[1] ) { mintstop_ = boundary.x[1] }
+     //print "Set AP window to [",apwin.x[0],",",apwin.x[1],"] -- check [",xtmp.min,",",xtmp.max,"]"
+}
+
+proc set_relative_idx() { local tmin, tmax, i,j,k, ws, we
+
+//print "Entering set_relative_idx() "
+	left_ptr = new Pointer(&exp_APleft)
+	right_ptr = new Pointer(&exp_APright)
+	n_ptr = new Pointer(&n_expAP)
+	nw_ptr = new Pointer(&n_expWin)
+	find_APtimes(xdat,ydat,xyAPtimes,"Exp AP",1,left_ptr,right_ptr,n_ptr,nw_ptr)
+	//objref tmp_idx
+
+	if( PASTE_DBG ) {
+	        print "in set_relative_idx()"
+		dbgfile=new File()
+		dbgfile.wopen("set_win.m")
+		dbgfile.printf("apwin = [")
+		apwin.printf(dbgfile)
+		dbgfile.printf("];\n")
+	}
+
+	idx_rel_list = new List()
+	xdat_rel_list = new List()
+	ydat_rel_list = new List()
+
+	for k = exp_APleft, exp_APright {
+	//for iloop = 0, n_expWin-1 {
+            //k = exp_APleft + iloop
+	    ws = apwin.x[0]
+	    we = apwin.x[1]
+
+	    if( apwin.x[0] + xdat.x[ydat.nextpeak(xyAPtimes.x[k])] < boundary.x[0] ) {
+	        ws = boundary.x[0] - xdat.x[ydat.nextpeak(xyAPtimes.x[k])]
+printf("Reset ws = %g - %g = %g.\t",boundary.x[0],xdat.x[ydat.nextpeak(xyAPtimes.x[k])],ws)
+	    }
+	    //if( apwin.x[0] + xdat.x[ydat.nextpeak(xyAPtimes.x[k])] > boundary.x[1] ) {
+	    //    ws = boundary.x[1]
+//printf("Reset ws = %g.\t",boundary.x[1])
+	    //}
+	    if( apwin.x[1] + xdat.x[ydat.nextpeak(xyAPtimes.x[k])] > boundary.x[1] ) {
+	        we = boundary.x[1] - xdat.x[ydat.nextpeak(xyAPtimes.x[k])] - dt
+//printf("Reset we = %g - %g -%g = %g.\t",boundary.x[1],xdat.x[ydat.nextpeak(xyAPtimes.x[k])],dt,we)
+	    }
+//printf("Set APWin %d to [%d, %d]\n",k,ws,we)
+
+	    tmin = xdat.indwhere(">=",ws+xdat.x[ydat.nextpeak(xyAPtimes.x[k])])
+            //if( tmin < 0 ) tmin = xdat.size-1
+	    tmax = xdat.indwhere(">=",we+xdat.x[ydat.nextpeak(xyAPtimes.x[k])])
+            if( tmax < 0 ) tmax = xdat.size-1
+            if( tmin < 0 ) tmin = tmax
+//printf("Setting window %d indices to [%d, %d]\n",k,tmin,tmax)
+            if( tmin > tmax ) tmin = tmax
+//printf("Had tmin > tmax; reset them to [%d, %d]\n",tmin,tmax)
+	    xtmp = xdat.c(tmin,tmax)
+	    ytmp = ydat.c(tmin,tmax)
+	
+		
+	    if( PASTE_DBG ) {
+	        print "apwin[",k,"] = (",ws,", ",we,")"
+		dbgfile.printf("xdat(:,%d)=[",k+1)
+		xdat.printf(dbgfile)
+		dbgfile.printf("];\nydat(:,%d)=[",k+1)
+		ydat.printf(dbgfile)
+		dbgfile.printf("];\n")
+	    }
+
+	    tmp_idx = new Vector(0)
+	    for i=0,xtmp.size-1 {
+	        if( PASTE_DBG ) { 
+	            dbgfile.printf("%%adding %d (%g, %g)\n",i,xtmp.x[i],ytmp.x[i]) 
+	        }
+	        j = pick_x(xtmp.x[i])
+	        tmp_idx.append(j)
+
+	        if( PASTE_DBG ) { if(i%500 == 0) { print "...done" } }
+	    }
+	    if( PASTE_DBG ) {print "done the loop, now sort()" }
+	    tmp_idx.sort()
+	    idx_rel_list.append(tmp_idx.c)
+
+	}
+
+        if( PASTE_DBG ) {
+	    print "done set_relative_idx()" 
+	    dbgfile.close()
+	    print "Leaving set_relative_idx() "
+	    print "SET_REL_IDX:"
+	    if( ydat_rel_list.count > 0 ) {
+	        for i = 0, ydat_rel_list.count-1 {
+		    print "\ty[",i,"] peak ",ydat_rel_list.object(i).x[ydat_rel_list.object(i).firstpeak]
+	        }
+	    } else { print "\tydat not set yet" }
+	}
+
+}
+
+
+proc adjust_region() {local x
+//print $1, $2, $3
+	if ($1 == 2) { // press
+		adjust = pick_region($2)
+		set_r()
+	}
+	if (adjust == -1) {
+		return
+	}
+	if ($1 == 1) { // drag
+		boundary.x[adjust] = $2
+		if (adjust < boundary.size-1) if ($2 > boundary.x[adjust+1]){
+			boundary.x[adjust] = boundary.x[adjust+1]
+		}
+		set_r()
+	}
+	if ($1 == 3) { // release
+		x = g.view_info(g.view_info, 11, $2)
+		if (boundary.size > 2) {
+			if (x < 0) {
+				boundary.remove(0)
+			}else if (x > 1) {
+				boundary.remove(boundary.size-1)
+			}else{
+				x = boundary.x[adjust]
+				tobj = boundary.c.indvwhere("==", x)
+				if (tobj.size > 1) {
+					boundary.remove[adjust]
+				}
+			}
+		}
+		boundary.sort()
+		set_r()
+		adjust = -1
+//print boundary.size, " boundaries"
+//print "boundary" boundary.printf
+//print "weight" weight.printf
+	}
+}
+
+
+func pick_region() {local vi, d, i, j, x, m
+	vi = g.view_info
+	x = g.view_info(vi, 13, $1)
+	for i=0, boundary.size() - 1 {
+		d = x -  g.view_info(vi, 13, boundary.x[i])
+		if (d < 12) { // before or on i
+			break
+		}
+	}
+	/***
+	if (i == boundary.size()) {
+		boundary.append($1)
+		return i
+	}
+	***/
+	if (d > -12) { // actual selection of line
+		return i
+	}
+        /***
+	boundary.insrt(i, $1)
+	if (i == 0) {
+		weight.insrt(1, weight.x[1])
+	}else{
+		weight.insrt(i, weight.x[i])
+	}
+        ***/
+	return i
+}
+
+
+proc get_outname() {
+     string_dialog("Enter output filename",$s1)
+}
+
+proc print_Mfile_header() { local e
+
+    e = $3
+
+	    dbgfile.printf("mod_APleft = %g; mod_APright = %g;\n",mod_APleft,mod_APright)
+	    dbgfile.printf("exp_APleft = %g; exp_APright = %g;\n",exp_APleft,exp_APright)
+
+	    if( GBAR_SMRY ) {
+	        dbgfile.printf("gbar_na=%g; gbar_k=%g; gbar_kca=%g;\n",gnabar_fn,gkbar_fn,gbar_kca)
+		dbgfile.printf("gbar_ka=%g; gbar_ca=%g; gbar_nap=%g;\n",gbar_ka,gbar_cahi,gbar_nap)
+		dbgfile.printf("Kp_cad=%g; Rca_cad=%g; ca0=%g;\n",Kp_cad,Rca_cad,cainf_cad)
+                //if( ismembrane("itGHK" )  { 
+                    dbgfile.printf("pcabar_CaT=%g;\n",pcabar_itGHK)
+                //}
+
+                //print_BP()
+	    }
+
+
+	    /****
+	    dbgfile.printf("lbl(%d) = {'Target FR %.1f Hz, CV %g'};\n",nlbl,datFRmean,datCVmean)
+	    nlbl += 1
+	    dbgfile.printf("lbl(%d) = {'Model FR %.1f Hz, CV %g'};\n",nlbl,modFRmean,modCVmean)
+	    nlbl += 1
+	    dbgfile.printf("lbl(%d) = {'F_{shape} = %g, F_{SubShape} = %g'};\n",\
+				   nlbl,shape_scale, subshape_scale)
+	    nlbl += 1
+	    ****/
+
+	    dbgfile.printf("lbl(%d) = {'F_{shape} = %g, F_{fr} = %g'};\n",nlbl,shape_scale,tot_frscale)
+	    nlbl += 1
+	    dbgfile.printf("lbl(%d) = {'F_{slope} = %g'};\n",nlbl,slope_scale)
+	    nlbl += 1
+
+	    dbgfile.printf("lbl(%d) = {'Burst ISI threshold = %g ms, penalty %g;'};\n", nlbl,brst_thold,brst_pnlty)
+	    nlbl += 1
+
+	    dbgfile.printf("lbl(%d) = {'1st spike delay penalty = %g;'};\n", nlbl,delay_pnlty)
+
+	    nlbl += 1
+	    dbgfile.printf("lbl(%d) = {'AP Window [%g, %g]'};\n",nlbl,apwin.x[0],apwin.x[1])
+	    nlbl += 1
+            dbgfile.printf("apwin = [%g %g];\n",apwin.x[0],apwin.x[1])
+	    dbgfile.printf("lbl(%d) = {' '};\n",nlbl)
+	    nlbl += 1
+
+	    dbgfile.printf("lbl(%d) = {'Extra silent model FR penalty = %g;'};\n", nlbl,nf_frscale)
+
+            //dbgfile.printf("tgt_val = [0.01 0.004 0.001 0.05 0.0125 0 0.00025 5e-5];\n")
+            //dbgfile.printf("mdl_val = [%g %g %g %g %g %g %g %g];\n",gnabar_fn,gkbar_fn,\
+            //               gbar_kca,Kp_cad,Rca_cad,gbar_ka,gbar_cahi,gbar_nap)
+            //dbgfile.printf("lblstr = {' g_Na','g_KDR','g_KCa','  K_p',' R_Ca',' g_KA',' g_Ca','g_NaP'};\n")
+            if( GBAR_SMRY ) {
+                dbgfile.printf("tgt_val = [0.01 0.004 0.001 0.05 0.0125 0 0.00025 5e-5 3e-5 0];\n")
+                dbgfile.printf("mdl_val = [%g %g %g %g %g %g %g %g %g %g];\n",gnabar_fn,gkbar_fn,\
+                               gbar_kca,Kp_cad,Rca_cad,gbar_ka,gbar_cahi,gbar_nap,g_pas,pcabar_itGHK)
+                dbgfile.printf("lblstr = {' g_Na','g_KDR','g_KCa','  K_p',' R_Ca',' g_KA',' g_Ca','g_NaP','g_L','g_CaT'};\n")
+            }
+
+	    nlbl += 1
+
+            /******
+	    if( GBAR_SMRY ) {
+		dbgfile.printf("lbl(%d) = {'g_{na} = %g   g_{k-dr} = %g'};\n",nlbl,gnabar_fn,gkbar_fn)
+	        nlbl += 1
+		dbgfile.printf("lbl(%d) = {'g_{k-ca} = %g   g_{k-a} = %g'};\n",nlbl,gbar_kca,gbar_ka) 
+	        nlbl += 1
+		dbgfile.printf("lbl(%d) = {'g_{ca} = %g   g_{nap} = %g'};\n",nlbl,gbar_cahi,gbar_nap)
+	        nlbl += 1
+		dbgfile.printf("lbl(%d) = {'Kp = %g   Rca = %g'};\n",nlbl,Kp_cad,Rca_cad)
+	        nlbl += 1
+		dbgfile.printf("lbl(%d) = {'[Ca]_0 = %g'};\n",nlbl,cainf_cad)
+	        nlbl += 1
+                //if( ismembrane("itGHK" )  { 
+		    dbgfile.printf("lbl(%d) = {'p_{CaT} = %g'};\n",nlbl,pcabar_itGHK)
+	            nlbl += 1
+                //}
+
+	    }
+	    ******/
+
+	    dbgfile.printf("boundary = [%g %g];\n",boundary.x[0],boundary.x[1])
+
+	    if( VERBOSE ) {
+                dbgfile.printf("%% Exp APs during interval = %d\n",n_AP)
+	        dbgfile.printf("xmodel = [")
+	        $o2.printf(dbgfile)
+	        dbgfile.printf("];\n")
+	        dbgfile.printf("ymodel = [")
+	        $o1.printf(dbgfile)
+	        dbgfile.printf("];\n")
+
+	        dbgfile.printf("xexpt = [")
+	        xdat.printf(dbgfile)
+	        dbgfile.printf("];\n")
+	        dbgfile.printf("yexpt = [")
+	        ydat.printf(dbgfile)
+	        dbgfile.printf("];\n")
+
+	        dbgfile.printf("expAPtimes = [")
+	        xyAPtimes.printf(dbgfile)
+	        dbgfile.printf("];\n")
+	        dbgfile.printf("modAPtimes = [")
+	        modelAPtimes.printf(dbgfile)
+	        dbgfile.printf("];\n")
+
+		/****
+	        dbgfile.printf("datFRmean = %g; datCVmean = %g;\n",datFRmean, datCVmean)
+	        dbgfile.printf("modFRmean = %g; modCVmean = %g;\n",modFRmean, modCVmean)
+	        dbgfile.printf("datFRsd = %g; datCVsd = %g;\n",datFRsd, datCVsd)
+	        dbgfile.printf("modFRsd = %g; modCVsd = %g;\n",modFRsd, modCVsd)
+		****/
+	    }
+	    nstr = 1
+
+}
+
+proc print_Mfile_tail() { local e
+
+    e = $3
+
+	    print "Total Error\t",e
+	    dbgfile.printf("e_final = %g;\n",e)
+	    //dbgfile.printf("str(%d) = {'Total Error           %g'};\n",nstr,e)
+	    //nstr += 1
+	    dbgfile.printf("lbl(%d) = {'Total Error           %g'};\n",nlbl,e)
+            nlbl += 1
+
+	    print "Raw voltage trace"
+	    dbgfile.printf("figure(1);\n")
+	    dbgfile.printf("h = axes('Position',[0 0 1 1],'Visible','off');\n")
+	    dbgfile.printf("ttl = '%s:  Total Error %g';\n",outname,e)
+	    if( VERBOSE ) {
+	        dbgfile.printf("axes('Position',[.1 .5 .8 .4]);\n")
+		dbgfile.printf("x1=[boundary(1) boundary(1)];\n")
+		dbgfile.printf("x2=[boundary(2) boundary(2)];\n")
+		dbgfile.printf("y1=[min(yexpt) max(yexpt)];\n")
+                dbgfile.printf("\nsubplot(2,1,1);\n")
+		dbgfile.printf("pl = plot(xexpt,yexpt,'--',xmodel,ymodel,'-',x1,y1,'r',x2,y1,'r');\n")
+		dbgfile.printf("set(pl(1),'LineWidth',2); set(pl(2),'LineWidth',2); \n")
+                dbgfile.printf("xlim([boundary(1)-10  boundary(2)+10]);\n")
+		dbgfile.printf("legend('target','model');\n")
+		dbgfile.printf("title(ttl);\n")
+
+                dbgfile.printf("\nsubplot(2,2,3);\n")
+                if( GBAR_SMRY ) { 
+                    dbgfile.printf("xmx=plot_deviation_from_tgt(tgt_val(end:-1:1),mdl_val(end:-1:1),lblstr(end:-1:1),'');\n")
+                }
+	    }
+	    //dbgfile.printf("set(gcf,'CurrentAxes',h);\n")
+	    //dbgfile.printf("text(.05,.25,lbl,'FontSize',12);\n")
+	    //dbgfile.printf("text(.5,.25,str,'FontSize',12);\n")
+	    dbgfile.printf("text(1.2*xmx,length(tgt_val)/2,lbl,'FontSize',10);\n")
+
+	    if( VERBOSE ) { dbgfile.printf("orient(gcf,'tall');saveas(gcf,'%s_V.fig');\n\n",outname) }
+
+	    //
+	    // print out time-modulated FR fits
+	    //
+	    print "Now, time-modulated FR fits"
+	    dbgfile.printf("figure(2);\n")
+	    dbgfile.printf("h2 = axes('Position',[0 0 1 1],'Visible','off');\n")
+	    dbgfile.printf("ttl2 = '%s:  Total time-modulated FR Error %g';\n",outname,efr)
+	    if( VERBOSE ) {
+                if( n_AP > 3 ) {
+	        dbgfile.printf("datFit=[ ")
+		if( datFit.size > 0 ) { datFit.printf(dbgfile) }
+	        dbgfile.printf("];\n")
+	        dbgfile.printf("modFit=[ ")
+	        if( modFit.size > 0 ) { modFit.printf(dbgfile) } 
+	        dbgfile.printf("];\n")
+		if( modFR.size > 0 ) {
+	            dbgfile.printf("modFR=[ ")
+	            modFR.printf(dbgfile)
+	            dbgfile.printf("];\n")
+		} else { dbgfile.printf("modFR=[];\n") }
+		if( datFR.size > 0 ) {
+	            dbgfile.printf("datFR=[ ")
+		    datFR.printf(dbgfile)
+		    dbgfile.printf("];\n")
+                } else { dbgfile.printf("datFR=[];\n") }
+		
+
+	        dbgfile.printf("axes('Position',[.1 .5 .8 .4]);\n")
+		dbgfile.printf("f1=[min([datFR ; modFR]) max([datFR ; modFR])];\n")
+		if( modFR.size < 1 ) {
+		    // recall, Matlab starts their indices at 1, not 0
+		    dbgfile.printf("frpl = plot(xexpt(expAPtimes(1:%d)),datFR,'b.',xexpt(expAPtimes(%d:%d)),datFit,'b-',[%f %f], [0 0],'g+',xexpt(expAPtimes(%d:%d)),modFit,'g--',x1,f1,'r',x2,f1,'r');\n",\
+		        exp_APright,exp_APleft+1,exp_APright,boundary.x[0],boundary.x[1],\
+			exp_APleft+1, exp_APright)
+		} else {
+		    dbgfile.printf("frpl = plot(xexpt(expAPtimes(1:%d)),datFR,'b.',xexpt(expAPtimes(%d:%d)),datFit,'b-',xmodel(modAPtimes(1:%d)),modFR,'g+',xexpt(expAPtimes(%d:%d)),modFit,'g--',x1,f1,'r',x2,f1,'r');\n",\
+			exp_APright, exp_APleft+1, exp_APright, mod_APright, exp_APleft+1, exp_APright)
+		}
+		dbgfile.printf("set(frpl(2),'LineWidth',2); set(frpl(4),'LineWidth',2); \n")
+		dbgfile.printf("legend('target','target fit','model','model fit');\n")
+		dbgfile.printf("title(ttl2);\n")
+		}
+	    }
+	    dbgfile.printf("set(gcf,'CurrentAxes',h2);\n")
+	    dbgfile.printf("text(.05,.25,lbl,'FontSize',12);\n")
+	    dbgfile.printf("text(.5,.25,str2,'FontSize',12);\n")
+	    if( VERBOSE ) { dbgfile.printf("orient(gcf,'tall');saveas(gcf,'%s_FR.fig');",outname) }
+
+}
+
+/********************************************************************
+
+measure_AHP()
+
+Taken from the Matlab function measure_AHP.m, this function will make 
+various measurements of the AHP.  Modified from 
+~christina/svn/nrn_chris/shared/measure_AHP.hoc to apply to this objective 
+function.
+
+% Measures of the AHP & proximity to firing threshold:
+% 
+%   1.  First, de-spike the voltage trace.  To do this, we propose finding 
+%       all points where the voltage is negative, and dV/dt is between -5
+%       and 5 mV/ms.  
+%   2.  Identify the AP threshold as the point at which dV/dt is first > 5
+%       mV/ms.
+%   3.  Identify only full ISIs.  When there are less than two spikes, use
+%       the entire de-spiked voltage trace.
+%
+%   Then, we propose the following measures:
+%
+%   A.  For each ISI, calculate the percentage of points having negative
+%       dV/dt.  Report the average of these values.  This is an attempt to
+%       measure the existence and strength of the late component of a
+%       double AHP.  
+%   B.  Find the AHP trough, the minimum value of the despiked trace.  Then
+%       calculate the difference between this and the AP threshold.
+%   C.  The point during the ISI that the trough occurs, Trough Timing /
+%       ISI Width.
+%   D.  Threshold accessibility, similar to that computed in Rudolph &
+%       Destexhe.  The only difference is to use dV/dt = 5 to define the AP
+%       threshold, not V(t) = -50.
+%
+
+	input	$o1		time vector
+			$o2		voltage vector
+	output	$p3		percentage of despiked trace with negative derivative
+			$p4		depth of AHP trough
+			$p5		time of AHP trough relative to ISI
+			$p6		threshold accessibility, similar to that computed by Rudolph & Destexhe.
+		$s7	output file basename
+                $8      dV/dt threshold for spikes
+
+********************************************************************/
+
+proc measure_AHP() {	 local ng_p, APth_master,i,tmp
+
+//    print "Measuring AHP..."
+
+	// Identify boundaries of the AHP regions.
+
+	dV = new Vector()
+	dV.deriv($o2,$o1.x[1]-$o1.x[0],2)
+
+	/*********************
+		iAHP  : the indices of points where -1*$8 < dV < $8, and V < 0
+		iAHPn : the indices of points where -1*$8 < dV < 0, and V < 0
+		APth  : the indices of points where APs occur, i.e. breaks in consecutive indices for iAHP.
+		APst  : starting indices of APth
+		APnd  : ending   indices of APth
+	*********************/
+
+	iAHP  = new Vector()
+	iAHPn = new Vector()
+	iAHPa = new Vector()
+	iAHP.indvwhere(dV,"[]",-1*$8,$8)
+	iAHPn.indvwhere(dV,"[)",-1*$8,0)
+//printf("...got iAHP,iAHPn")
+
+	//Now we need to reexamine these lists to ensure the associated voltages are negative.
+	iAHPa.indvwhere($o2.ind(iAHP),"<",0)
+	iAHP.index(iAHP,iAHPa)
+	iAHPa.indvwhere($o2.ind(iAHPn),"<",0)
+	iAHPn.index(iAHPn,iAHPa)
+//printf("...got iAHPa indices.\n")
+
+	neg_p  = iAHPn.size()/iAHP.size()
+//printf("%%%% Found %d / %d = %g negative dV/dt percentage.\n",iAHPn.size(),iAHP.size(),neg_p)
+	//ng_p  = iAHPn.size()/iAHP.size()
+
+	APth = new Vector()
+	APst = new Vector()
+	APnd = new Vector()
+//printf("Defined APvectors.\n")
+        if( iAHP.size() > 0 ) {
+	    AHPchg = iAHP.c(1,iAHP.size()-1).sub(iAHP.c(0,iAHP.size()-2))
+        } else {
+            AHPchg = new Vector()
+        }
+//printf("\tAHPchg defined")
+	APth.indvwhere(AHPchg,"!=",1)
+//printf("\tAPth defined")
+
+	if( APth.size() > 1 ) {
+//printf("\tAPth.size = %d\n",APth.size())
+//APth.printf()
+		APst = APth.c(0,APth.size()-2).add(1)
+		APnd = APth.c(1,APth.size()-1)
+//printf("\tAPst=%d, APnd = %d\n",APst.size,APnd.size)
+	}
+
+
+	// print matlab file to plot these regions.
+//printf("\tprinting matlab\n")
+/****
+        sprint(AHPname,"%s_AHPmeas.m",outname)
+	AHPout = new File()
+	AHPout.wopen(AHPname)
+	AHPout.printf("tvec = [ ")
+	$o1.printf(AHPout)
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("vvec = [ ")
+	$o2.printf(AHPout)
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("dV = [ ")
+	dV.printf(AHPout)
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("iAHP = [")
+        if( iAHP.size() > 0 ) {
+ 	    iAHP.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+	AHPout.printf("iAHPn = [")
+        if( iAHPn.size() > 0 ) {
+ 	    iAHPn.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+	AHPout.printf("APth = [")
+        if( APth.size() > 0 ) {
+ 	    APth.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("APst = [")
+        if( APst.size() > 0 ) {
+ 	    APst.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+	AHPout.printf("APnd = [")
+        if( APnd.size() > 0 ) {
+ 	    APnd.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("iAHPa = [")
+        if( iAHPa.size() > 0 ) {
+ 	    iAHPa.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+	AHPout.printf("AHPchg = [")
+        if( AHPchg.size() > 0 ) {
+	    AHPchg.c.add(1).printf(AHPout)
+        }
+	AHPout.printf("];\n\n")
+
+	AHPout.printf("subplot(2,1,1);\n")
+	AHPout.printf("plot(tvec, vvec,'-',tvec(iAHP),vvec(iAHP),'.'")
+	if( APth.size() > 0 ) {
+		AHPout.printf(",tvec(iAHP(APth)),vvec(iAHP(APth)),'rx',tvec(iAHPn),")
+		AHPout.printf("vvec(iAHPn),'^');\n")
+		AHPout.printf("legend('raw trace','de-spiked data','AP thresholds','negative dV/dt');\n")
+		AHPout.printf("hold on;\n")
+		AHPout.printf("for i=1:length(APst)\n")
+	        AHPout.printf("\tplot([tvec(iAHP(APst(i))) tvec(iAHP(APst(i)))],")
+		AHPout.printf("[-70 40],'-',[tvec(iAHP(APnd(i))) tvec(iAHP(APnd(i)))],[-70 40],'-'); ")
+		AHPout.printf("end;\n")
+	} else {
+		AHPout.printf(",tvec(iAHPn),vvec(iAHPn),'^');\n")
+		AHPout.printf("legend('raw trace','de-spiked data','negative dV/dt');\n")
+		AHPout.printf("hold on;\n")
+		AHPout.printf("plot([tvec(1) tvec(end)],[-70 40],'-');\n")
+	}
+	AHPout.printf("subplot(2,1,2);\n")
+	AHPout.printf("plot(tvec, dV,'-');\n")
+	AHPout.printf("subplot(2,1,1);\n")
+****/
+
+	//
+	// make sure there are still data available, if no APs are fired.  Then,
+	// assume AP threshold = 50.
+
+	npts = new Vector()
+	trough_sz = new Vector()
+	trough_posn = new Vector()
+
+	if( APst.size() == 0 ) {
+	    APth_master = -50
+	    trough_sz.append(0)
+    	    trough_posn.append(0)
+	    npts.append(iAHP.size())
+	} else {
+  	    // old; APth is an index into iAHP.
+	    //APth_master = $o2.ind(APth.c.add(1)).mean
+	    APth_master = $o2.ind(iAHP.ind(APth).c.add(1)).mean
+
+	    for i = 0, APst.size()-1 {
+
+    	    //
+      	    // Find the difference between the trough of each AHP and the AP
+	    // threshold, and the relative position of this trough during the ISI.
+
+	    // NOTE:  The mnidx returned is ALREADY OFFSET from the start of 
+	    // the vector.  i.e., we don't have to add the starting position 
+	    // iAHP.x[APst.x[i]]
+	        mnidx = $o2.min_ind(iAHP.x[APst.x[i]],iAHP.x[APnd.x[i]])
+		trough_sz.append($o2.x[iAHP.x[APth.x[i]-1]]-$o2.x[mnidx])
+		trough_posn.append((mnidx-iAHP.x[APst.x[i]])/(iAHP.x[APnd.x[i]]-iAHP.x[APst.x[i]]+1))
+		npts.append(iAHP.x[APnd.x[i]]-iAHP.x[APst.x[i]]+1)
+		//AHPout.printf("mnidx(%d)=%g; minval(%d)=%g;\n",i+1,mnidx-iAHP.x[APst.x[i]],i+1,$o2.x[mnidx])
+    	    }
+	    //AHPout.printf("for i = 1 : size(APst,1)\n")
+    	    //AHPout.printf("plot(tvec(iAHP(APst(i))+mnidx(i)),minval(i),'k*');\n")
+	    //AHPout.printf("end;\n")
+	}
+
+	//  Calculate how close this ISI sits to threshold.
+        /****
+	AHPout.printf("npts=[\n")
+	if( npts.size() > 0 )  npts.printf(AHPout)
+	AHPout.printf("];\n")
+	AHPout.printf("trough_sz=[\n")
+	if( trough_sz.size() > 0 ) trough_sz.printf(AHPout)
+	AHPout.printf("];\n")
+	AHPout.printf("trough_posn=[\n")
+	if( trough_posn.size() > 0 ) trough_posn.printf(AHPout)
+	AHPout.printf("];\n")
+        ****/
+	mnV   = $o2.ind(iAHP.c.add(1)).mean
+	sdV   = $o2.ind(iAHP.c.add(1)).stdev
+	thr_ac = sdV / (APth_master - mnV)
+
+	//AHPout.printf("mnV=%g; sdV=%g;\n",mnV,sdV)
+	//AHPout.printf("plot([tvec(1) tvec(end)],[mnV mnV],'k-');\n")
+
+	trgh_sz = npts.dot(trough_sz) / npts.sum()
+	trgh_ps = npts.dot(trough_posn) / npts.sum()
+
+	$o3.val = neg_p
+	$o4.val = trgh_sz
+	$o5.val = trgh_ps
+	$o6.val = thr_ac
+
+	//AHPout.close()
+}
+
+func BParea() { local sum
+
+    sum = 0
+
+    forall {
+        ifsec "soma" continue
+        if( !ismembrane("max")) continue 
+print secname()
+        for(x) {
+            if( x==0 || x==1 ) continue
+            sum += L*val_max(x)/(nseg)
+print "\t",x,nseg,L/(nseg),val_max(x),sum
+        }
+    }
+
+    return sum
+}
+
+
+proc print_BP() {  local s_rad
+
+print "Now printing BP"
+    if( !ismembrane("max") ) return
+                
+print "\tDidn't return yet."
+//    soma { 
+        distance() 
+        s_rad = diam/2
+//    }
+
+    dbgfile.printf("BP = [\n")
+print "calculating BP"
+    forall {
+print secname()
+        ifsec "soma" continue
+        if( !ismembrane("max")) continue 
+print "\thas max"
+        for(x) {
+            if( x==0 || x==1 ) continue
+print "\t\tcomponent ",x," max = ",val_max(x)
+            sum += L*val_max(x)/(nseg)
+            dbgfile.printf("%g %g\n",distance(x)-s_rad,val_max(x))
+        }
+    }
+    dbgfile.printf("];\n")
+
+    dbgfile.printf("BParea = %g\n",BParea())
+
+    return
+}
+
+
+endtemplate AP_instFR_Fitness

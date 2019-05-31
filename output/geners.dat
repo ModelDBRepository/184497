@@ -1,0 +1,12 @@
+Dec15IR2e_y/Dec15IR2e_y_2s_p180.dat
+Dec15IR2e_y/Dec15IR2e_y_2s_p230.dat
+Dec15IR2e_y/Dec15IR2e_y_2s_p280.dat
+Dec15IR2e_y/Dec15IR2e_y_2s_p330.dat
+Dec15IR2e_y/Dec15IR2e_y_2s_p380.dat
+Tend: 2015
+spikeWinStart: -10
+spikeWinEnd: 70
+spikeZoomStart: -2
+spikeZoomEnd: 3
+termCritLevel: 100
+traceToUseForFirstSpikes: 2

@@ -1,0 +1,170 @@
+//CONTROLS:
+RUN=0
+MULOBJ=0
+NSDE_COMB_FFS=0
+RUNLHS=0
+VTRACES=0
+IVFI=0	// 0=not running IV/FI protocol; 1=runIV ; 2=runFI;
+SA=0
+RT=0
+NORMFFS=0
+SAVEVOLT=0
+CVODE=0
+NEVOLVER=0
+MODEL=1 // 0=destexhe; 1=traub; 2=coskren/full morph (correct folder only)
+MRFflag=5 // 0=3act2s; 1=4pass2s; 2=1pass02s; 3=9pass200ms; 4=4act2s; 5=usedatfiles
+CELL=2 // 1=May3IR2h; 2=Dec15IR2e; 3=Jun24IR2i
+strdef PARENTDIR
+PARENTDIR=getcwd()
+
+// initialise the parallelContext()
+objref pc
+pc = new ParallelContext()
+
+load_file("nrngui.hoc")
+
+// load multiple run fitter
+load_file("optmz/mulfit.hoc")
+
+// load neuron model / template
+if (MODEL==1) {
+	load_file("model/pyr3.hoc")
+} else if (MODEL==2) {
+	load_file("model/main_CoskrenYadav_basic.hoc")
+	//load_file("model/coskrenCell.hoc")
+}
+
+load_file("setup/setupMRF.hoc")
+
+// set up the GA (has to be after MRF setup)
+
+// if this is the LHS run...
+if ( RUNLHS == 1 ) {
+	// set up for LHS ( has to be after MRF setup )
+	load_file( "setup/lhs_setup.hoc" )
+} else {
+	// set up the DE (has to be after MRF setup)
+	load_file("setup/de_setup.hoc")
+}
+
+// set parameters...
+set_conds()
+set_kins()
+//use unset_active line if we're doing subthreshold optimisation...
+pyr3_.unset_active()
+
+// variable step control:
+// traub model requires DASPK method:
+// note: doesn't seem to work with calculating shape errors, so set 0
+if (CVODE) {
+	objref cvode
+	cvode = new CVode()
+	cvode.active(1)
+	cvode.use_daspk(1)
+}
+
+/*****************************************
+ * Custom initialisation proc, if anything 
+ * needs doing to this MRF to get a steady 
+ * state at t==0
+ ****************************************/
+
+proc init() { local dtsav, temp
+	//inittime=startsw()
+	finitialize(v_init)
+	// travel into the past, take large steps forward with implicit 
+	// Euler to establish steady voltage, then return to the present
+	t  = -2000
+	dtsav = dt
+	//dt = dtsav*100
+	dt = dtsav
+	// if cvode is on, turn it off to do large fixed step
+	temp = cvode.active()
+	if (temp!=0) { cvode.active(0) }
+	while (t<0) {
+		fadvance()
+	}
+	// restore cvode if necessary
+	if (temp!=0) { cvode.active() }
+	dt = dtsav
+	t = 0
+	tstop=2015
+	if (cvode.active()) {
+		cvode.re_init()
+	} else {
+		fcurrent()
+	}
+	frecord_init()
+}
+
+INITDUR = 500 // change this according to what you discover in step 2 above
+V0 = -70 // the initial v you want at the current injection site
+if ( CELL == 2 ) {
+	V0 = -70
+} else if ( CELL == 3 ) {
+	V0 = -68.5
+}
+
+load_file("custominit.hoc")
+
+if ( RUN ) {
+	runtime = startsw()
+	if ( pc.nhost > 1 ) {
+		{ pc.runworker() }
+	}
+	if ( RUNLHS ) {
+		LHS()
+	} else if ( MULOBJ ) {
+		NSDE()
+	} else {
+		DE()
+	}
+	printf( "run time = %g\n" , startsw() - runtime)
+	if ( pc.nhost > 1 ) {
+		{ pc.done() }
+	}
+	if ( SAVEVOLT ) {
+		//save voltage traces for the final population
+		save_voltages()
+	} else {
+		vt_file.close()
+	}
+	quit()
+} else if ( VTRACES ) {
+	LOAD_GENERATION = 1
+	init_pop()
+	save_voltages()
+	quit()
+} else if ( IVFI ) {
+	LOAD_GENERATION = 1
+	init_pop()
+	if ( IVFI == 1 ) {
+		save_iv()
+	} else if (IVFI == 2 ) {
+		save_fi()
+	}
+	quit()
+} else if ( SA ) {
+	if ( pc.nhost > 1 ) {
+		{ pc.runworker() }
+	}
+	LOAD_GENERATION = 1
+	init_pop()
+	sensitivity_analysis()
+	quit()
+} else if ( RT ) {
+	if ( pc.nhost > 1 ) {
+		{ pc.runworker() }
+	}
+	random_testing()
+	quit()
+} else if ( NEVOLVER ) {
+	if ( pc.nhost > 1 ) {
+		{ pc.runworker() }
+	}
+	load_file( "setup/nevolver.hoc" )
+	load_params_from_nevolver()
+	evaluate_once()
+	save_fitness_values_for_nevolver()
+	quit()
+}

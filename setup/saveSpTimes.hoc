@@ -1,0 +1,61 @@
+//---------------------------------------------------------------------------
+//	set up an output of action potential times
+//---------------------------------------------------------------------------
+// also includes output of the voltage trace from one of the simulations
+//---------------------------------------------------------------------------
+
+// set up some objects
+objref apc	//object to count action potentials
+objref v1	//vector to hold action potential data
+objref v2	//vector to hold voltage trace
+objref voltOut	//vector to hold voltage trace for file output
+objref f1	//file to save the spike times
+objref f2	//file to save voltage trace
+objref tempmatrix	//matrix of spike times:
+					//	each row is a different spike number
+					//	each col is a different input current
+
+// initialise these objects
+apc = new APCount(0.5)
+v1 = new Vector()
+v2 = new Vector()
+voltOut = new Vector()
+f1 = new File()
+f2 = new File()
+tempmatrix = new Matrix()
+
+apc.record(v1)	//record spike times into v when the simulation runs
+v2.record(&PY[0].soma.v(0.5)) //record the voltage in v2 (pyramidal)
+//v2.record(&IN[0].soma.v(0.5)) //record the voltage in v2 (interneuron)
+
+tempmatrix.resize(10,10)//size the matrix
+
+El[0].stim.del = 300	//set this so that fig1d comes out ok
+
+// Run the simulation... create a loop for multiple runs...
+//start of loop
+for i = 0, 9 {
+	El[0].stim.amp = ( ( i + 1 ) / 20 )
+	print El[0].stim.amp // change the input current
+	
+	run()
+	
+	if (i==6) {
+		voltOut.copy(v2)
+	}
+	
+	// save first 10 spike times of each run in a seperate matrix col
+	v1.resize(10)
+	tempmatrix.setcol(i, v1)
+	//end of loop
+}
+
+f1.wopen("spTimes.dat")	//open spTimes.dat file for writing
+tempmatrix.fprint(0,f1)
+f1.close()
+
+f2.wopen("vTrace.dat")	//open vTrace.dat file for writing
+voltOut.printf(f2)
+f2.close()
+
+quit()

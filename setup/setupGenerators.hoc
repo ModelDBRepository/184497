@@ -1,0 +1,110 @@
+/***********************************************************************
+ * setupGenerators.hoc
+ * Generic instructions to set up the generators in a multiple run
+ * fitter. Needs to have a list of the data files used as the existing
+ * data to be matched to already specified in a Lists called gener.
+ * 
+ **********************************************************************/
+
+// List of strings holding the stimulus amplitudes
+objref stimAmpList
+stimAmpList = new List()
+objref numFFsInGen
+numFFsInGen = new Vector()
+
+// Load generator information according to generators.dat file, format:
+//	Name				stimAmp
+//	name1				stimAmp1
+//	...					...
+//	nameN				stimAmpN
+
+objref gendat_file
+gendat_file = new File()
+if (CELL==2) {
+	gendat_file.ropen( "setup/generators_y.dat" )
+} else if (CELL==3) {
+	gendat_file.ropen( "setup/generators_a.dat" )
+}
+strdef dummy
+for i = 1,3 {
+	gendat_file.scanstr( dummy )
+}
+while ( !gendat_file.eof() ) {
+	gendat_file.scanstr( dummy )
+	sprint(xstr,"%s/%s_%s",cellname,cellname,dummy)
+	gener.append( new String( xstr ) )
+	gendat_file.scanstr( dummy )
+	stimAmpList.append( new String( dummy ) )
+	numFFsInGen.append( gendat_file.scanvar() )
+}
+gendat_file.close()
+
+// Ready fitness function file for input:
+objref fitfunc_file
+fitfunc_file = new File()
+if (CELL==2) {
+	fitfunc_file.ropen( "setup/fitnessfunctions_y.dat" )
+} else if (CELL==3) {
+	fitfunc_file.ropen( "setup/fitnessfunctions_a.dat" )
+}
+for i=1,9 {
+	fitfunc_file.scanstr( dummy )
+}
+// Load fitness function information into the generators, in generatorMouldNew
+gen = 0
+while ( gen < gener.count() ) {
+	xopen( "setup/generatorMoulds/generatorMouldNew.hoc" )
+	gen = gen + 1
+}
+
+/*************************
+ * Done making generators.
+ ************************/
+
+/**
+ * Make file holding names of generator files - for use in analysis
+ * Format:
+ * gener.count() x 	{ Paths to files used in generators
+ * 					{ Tstart
+ * 					{ Tend
+ * 					{ spikeWinStart
+ * 					{ spikeWinEnd	
+ * traceToUseForFirstSpikes
+ * 
+ * Need to find a flexible way of setting this up such that appropriate
+ * analysis can be run given which fitness functions are present in 
+ * each generator.
+ * Also need some logic to figure out which one to use for firstSpikes.
+ */
+
+//initialise the gener file:
+objref gener_file
+gener_file = new File()
+sprint( xstr, "%soutput/geners.dat", PARENTDIR )
+gener_file.wopen( xstr )
+for i = 0 , gener.count()-1 {
+	gener_file.printf( "%s.dat\n" , gener.o(i).s )
+}
+gener_file.printf( "%s: %d\n" , "Tend" , 2015 )
+gener_file.printf( "%s: %d\n" , "spikeWinStart" , -10 )//fitParams1.x[0] )
+gener_file.printf( "%s: %d\n" , "spikeWinEnd" , 70 )//fitParams2.x[0] )
+gener_file.printf( "%s: %d\n" , "spikeZoomStart" , -2 )
+gener_file.printf( "%s: %d\n" , "spikeZoomEnd" , 3 )
+gener_file.printf( "%s: %d\n" , "termCritLevel" , 100 )
+traceToUseForFirstSpikes = 2
+gener_file.printf( "%s: %d\n" , "traceToUseForFirstSpikes" , \
+				   traceToUseForFirstSpikes )
+gener_file.close()
+
+// function to return all error values from all generators
+obfunc get_error_values() { local i , j		localobj errorVec
+
+	errorVec = new Vector()
+	for i = 0 , gener.count()-1 {
+		for j = 0 , MRF.p.pf.generatorlist.object(i).gen.fitnesslist.count()-1 {
+			errorVec.append( \
+			MRF.p.pf.generatorlist.object(i).gen.fitnesslist.object(j).error )
+		}
+	}
+	return errorVec
+}

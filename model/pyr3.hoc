@@ -1,0 +1,28 @@
+/*
+
+This port was made from the FORTRAN code into the NEURON enviroment based on 
+
+	Traub RD, Buhl EH, Gloveli T, Whittington MA. Fast Rhythmic Bursting Can Be Induced in Layer 2/3 Cortical Neurons by Enhancing Persistent Na(+) Conductance or by Blocking BK Channels.J Neurophysiol. 2003 Feb;89(2):909-21
+
+This port was made by Roger D Traub and Maciej Lazarewicz (mlazarew@seas.upenn.edu)
+
+Thanks to Ashlen P Reid for help with porting a morphology of the cell.
+
+*/
+
+// include this first in every cell template file for different models, 
+// adjusting values depending on what they are called in the model:
+strdef somaname,stimname
+somaname="pyr3_.comp[1].v( 0.5 )"
+stimname="pyr3_.inj1_.amp"
+
+load_file("model/pyr3_template")
+
+objref pyr3_
+pyr3_ = new pyr3(MRFflag,CELL)
+
+dt     		= 0.025 // Simulation are producion proper results even with time step 25 us
+steps_per_ms 	= 40
+
+tstop  		= 2015
+v_init 		= -70

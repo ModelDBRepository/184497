@@ -1,0 +1,222 @@
+<html>
+<p>README for Rumbell et al 2016 code
+</p>
+<h1><a name="section_1">Preliminary step</a></h1>
+<p/> The below help is for the unix/linux environment.  If you need help for mswin or graphical Mac OS X please consult <a href="https://senselab.med.yale.edu/ModelDB/NEURON_DwnldGuide.cshtml">https://senselab.med.yale.edu/ModelDB/NEURON_DwnldGuide.cshtml</a>
+<p>First, the .mod files in the optmz/ and model/ directories must be compiled, using:
+</p><p>    |-&gt; nrnivmodl optmz model
+</p>
+<h1><a name="section_2">Starting Neuron and selection a  model</a></h1>
+
+<p>Models of both the young and aged neurons can be viewed by running the following commands:
+</p>
+<p>    |-&gt; nrngui init_gui.hoc
+</p>
+<p>This initialises NEURON with a GUI window containing buttons to instantiate different models.<br/>
+<img src="./images/screenshot1.png" alt="screenshot 1"><br/>
+The options are:
+</p>
+<p>Neuron -&gt; "young" or "aged"<br/>
+Model types -&gt; "4-channel" or "8-channel"
+</p>
+<p>These variables select which of the 4 simulation results shown in Figures 4, 5, 7 or  8 to load.
+</p>
+<h1><a name="section_3">Viewing Figures from the paper</a></h1>
+
+<p>After the variables are set, clicking the "Graphs" button will load panels c, d and e for the selected simulation (i.e. parameters are set in the model for the best total fit, best PP fit and best FR fit from those optimization results, and the model is then run at both low input current (+80 pA Aged, +230 pA Young) and at high input current (+380 pA).
+</p>
+<p/> For example selecting Neuron -> Aged, and Model types -> Advanced 7 channel mode results in the following graphs similar to Figure 8:<br/>
+<img src="./images/screenshot2.png" alt="screenshot 2">
+<h1><a name="section_4">Investigating the models</a></h1>
+
+<p>Selecting the "MRF" button instead will load the "Multiple Run Fitter" window, where error function values are shown.
+The "MulRunFitter[0] Domain" window can be closed.
+In the "MulRunFitter[0]" window, all of the different input current levels used in the suprathreshold fitting can be accessed in the 'Generators' panel on the right. Clicking one of these 'generators' brings up a window showing the empirical trace in red. 
+The input current is listed as "Before: pyr_.inj1_.amp=". 
+All of the error functions used at this current injection level are on the right, each listed as "pyr3_.comp[1].v( 0.5)". 
+Selecting one of these will show the error value for that error function in the box just below (before a simulation is run, final error values are listed as "xxxxxxxxxx"). 
+Clicking the "Error Value" button in this window will run the model, showing the model membrane potential as a black trace. 
+Error function values are now displayed in the middle box, on the right, and can be viewed individually by clicking through the list in the right panel.
+The "Error Value" box at the top shows the weighted sum of all error functions at this input current level.
+Back in the MulRunFitter[0] window, clicking "ErrorValue" will simulate all current injections, and a total error for the model will appear.
+</p>
+<p>Parameters are currently not correctly displayed in the "Parameters" side of the window.
+</p>
+<h1><a name="section_5">Altering parameters</a></h1>
+
+<p>Parameter alterations are currently done from the NEURON terminal.
+The list of available parameters is in the file 'parameters.dat'.
+These are 'dummy' parameters (they all have d in front), which are then scaled according to factors found in Table 3 in the paper when set throughout the model.
+The current value of each parameter can be found by typing it in the NEURON terminal.
+To change a parameter, set the 'dummy' version using e.g.:
+</p><p>    |-&gt; dgnaf = 0.04<br/>
+Then set throughout the model using:
+</p><p>    |-&gt; set_conds()<br/>
+for conductance parameters, or:
+</p><p>    |-&gt; set_kins()<br/>
+for kinetic parameters.
+</p>
+<p>'dg' parameters are maximal conductances, 'dtm' parameters are activation time constant modifiers (kinetic), and 'dvs' parameters are activation voltage modifiers (kinetic).
+</p>
+<hr/>
+File contents
+<hr/>
+
+<p>root/
+</p><ul>
+  <li>custominit.hoc
+  <ul>
+    <li>Creates the 'holding current' clamp, and contains a custom version of the init() proc that initializes the model using the holding current method described in the paper
+  </li></ul>
+  </li><li>init_gui.hoc
+  <ul>
+    <li>Main .hoc file to run to get a GUI for selecting the neuron model and parameter set to load, and plot Figures.
+    </li><li>Parameter combinations for each of the final models are hardcoded in the 'set_model_parameters()' obfunc (line 68)
+  </li></ul>
+  </li><li>init.hoc
+  <ul>
+    <li>Initialization file loading just straight into the MultipleRunFitter window, without any parameters set
+    </li><li>This is the file used normally for running optimizations
+    </li><li>Setting RUN=1 will start a DE run. Setting MULOBJ=1 as well will start an NSDE run (20 objectives). Setting NSDE_COMB_FFS=1 will normally start a NSDE run with 2 (or however many) objectives, but will not work without additional settings files.
+  </li></ul>
+  </li><li>re_init.hoc
+  <ul>
+    <li>Initialize a new model AFTER already loading a model
+  </li></ul>
+  </li><li>vsrc.ses
+  <ul>
+    <li>Session file loading the holding current clamp
+  </li></ul>
+</li></ul>
+<p>root/data/
+</p><ul>
+  <li>Dec15IR2e_y/
+  <ul>
+    <li>Contains data files for all Young neuron current injection recordings
+  </li></ul>
+  </li><li>Jun24IR2i_o/
+  <ul>
+    <li>Contains data files for all Aged neuron current injection recordings
+  </li></ul>
+  </li><li>rands.dat
+  <ul>
+    <li>list of 1000 random numbers
+  </li></ul>
+  </li><li>rnd.sh
+  <ul>
+    <li>random number generator script. New random seeds can be generated using "./rnd.sh 1000 &gt; rands.dat" 
+  </li></ul>
+</li></ul>
+<p>root/model/
+</p><ul>
+  <li>.mod files for all ion channels
+  </li><li>pyr3.hoc
+  <ul>
+    <li>Loads the cell model by calling pyr3_template
+  </li></ul>
+  </li><li>pyr3_template
+  <ul>
+    <li>Morphological model in .hoc code, from Traub2003
+    </li><li>Scaling factors for young and aged neurons are hardcoded in the new declaration of proc init(), lines 51--64
+  </li></ul>
+</li></ul>
+<p>root/optmz/
+</p><ul>
+  <li>multfit/
+  <ul>
+    <li>Contains error function files used in the MultipleRunFitter()
+    </li><li>e_phaseplane.hoc contains code for the PP error functions
+    </li><li>e_apwinfrcv.hoc contains code for the FR error functions
+    </li><li>e_apwinfrvc.hoc also contains code for the WF and delay error functions
+  </li></ul>
+  </li><li>mulfit.hoc
+  <ul>
+    <li>loads all files necessary to calculate error functions using the MultipleRunFitter
+  </li></ul>
+  </li><li>feature_weaver.mod
+  <ul>
+    <li>mod file (needs compiling) involved in error function calculations
+  </li></ul>
+</li></ul>
+<p>root/output/
+</p><ul>
+  <li>output files from the optimization runs get written here
+  </li><li>geners.dat
+  <ul>
+    <li>Information about which generators (input current protocols) are being used gets written here every time the model is instantiated
+  </li></ul>
+  </li><li>params.dat
+  <ul>
+    <li>The list of parameters loaded gets written here
+  </li></ul>
+  </li><li>vtraces.dat
+  <ul>
+    <li>This file is ready to receive voltage traces when recordings are being saved
+  </li></ul>
+</li></ul>
+<p>root/preProcess/
+</p><ul>
+  <li>Matlab files in here for using the LHS
+  </li><li>getWeightsFromLHS.m
+  <ul>
+    <li>Matlab script to calculate error function weights from a file 'lhsrsults.dat' in the 'output' folder.
+    </li><li>Finds the top 5% of error values in the lhs results file, for each function
+    </li><li>The number in 5% is hardcoded on line 33
+  </li></ul>
+  </li><li>setupLHS.m
+  <ul>
+    <li>Matlab script to sample the parameter space and save all points found to be simulated at the LHS stage of the optimization
+    </li><li>loads 'setup/parameters.dat' to determine ranges for each parameter
+    </li><li>uses the 'lhsdesign' function to generate the sampling
+    </li><li>writes the output population to 'output/curr_population'
+    </li><li>this can then be simulated by setting RUN=1 and RUNLHS=1 in the init.hoc file
+  </li></ul>
+</li></ul>
+<p>root/setup/
+</p><ul>
+  <li>The most important folder for setting up the models and optimization. In order that they are loaded:
+  <ul>
+    <li>setupMRF.hoc
+    <ul>
+      <li>Sets up basics of the MultipleRunFitter, which holds information about parameters and error functions to be used in the optimization
+      </li><li>cell names are hardcoded in here on lines 12 and 14, and must match prefixes in the data/ folder
+      </li><li>calls setupGenerators.hoc and setupParameters.hoc to load error functions and parameters
+      </li><li>opens several output files ready for writing
+      </li><li>contains procs for running output simulations, generating things like the voltage traces, IV curves, FI curves used in the Figures
+    </li></ul>
+    </li><li>setupGenerators.hoc
+    <ul>
+      <li>loads generators for either the young or aged neuron, where each generator is a current injection protocol at a certain input current level
+      </li><li>sets error functions for each listed in the 'fitnessfunctions.dat' file by calling 'generatorMoulds/generatorMouldsNew.hoc' for each error function
+    </li></ul>
+    </li><li>generatorMoulds/generatorMouldsNew.hoc
+    <ul>
+      <li>a generic template for setting up an error function according to the parameters read from 'fitnessfunctions.dat' by 'setupGenerators.dat'
+      </li><li>parameters include: which type of error, the time windows relating to the error, and the weight of the error
+    </li></ul>
+    </li><li>setupParameters.hoc
+    <ul>
+      <li>VERY important file for setting up the models properly
+      </li><li>the dummy parameters are initialized here
+      </li><li>the maximal conductance ratois throughout compartments of the Traub morphology are hardcoded here in the set_conds() proc (line 167)
+      </li><li>the set_kins() proc checks to see whether kinetics have been modified from their default values, and tells the ion channels to use the changed values if they have been
+    </li></ul>
+    </li><li>de_setup.hoc
+    <ul>
+      <li>Contains the code for the Differential Evolution and Non-Dominated Sorting Differential Evolution algorithms
+      </li><li>Along with all parameters for using these algorithms
+      </li><li>pop_size controls the populations size (default 256)
+      </li><li>F controls the DE distance change rate (default 0.9)
+      </li><li>max_time controls the time to run the algorithm for in seconds (default 144000 which is 40 hours)
+      </li><li>LOAD_GENERATION controls whether to load a saved generation (i.e. to continue a run from a saved point) (0 = no, generate new population at random; 1 = yes)
+      </li><li>DE() and NSDE() procs are the main loops for the algorithms
+      </li><li>Functions are in place for either parallel or non-parallel operation
+      <ul>
+        <li>lhs_setup.hoc
+      </li></ul>
+      </li><li>similar to de_setup.hoc, but sets pop_size to the number of population found in the output/curr_population file, and only runs for one generation, saving the output error function values to output/lhsresults.dat
+    </li></ul>
+  </li></ul>
+</li></ul>
+
+</html>
